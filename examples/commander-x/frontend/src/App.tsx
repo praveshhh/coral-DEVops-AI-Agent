@@ -90,6 +90,7 @@ const App: React.FC = () => {
   ]);
   const [currentContext, setCurrentContext] = useState<'local' | 'ssh' | 'mysql'>('local');
   const [coralSources, setCoralSources] = useState<string[]>([]);
+  const [sessionReady, setSessionReady] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
@@ -100,9 +101,11 @@ const App: React.FC = () => {
   useEffect(() => {
     axios.post('http://localhost:8000/session').then(({ data }) => {
       sessionId.current = data.session_id;
+      setSessionReady(true);
     }).catch(() => {
       // Fallback: use a cryptographically random client ID
       sessionId.current = crypto.randomUUID();
+      setSessionReady(true);
     });
   }, []);
 
@@ -114,9 +117,11 @@ const App: React.FC = () => {
     terminalRef.current?.scrollTo({ top: terminalRef.current.scrollHeight, behavior: 'smooth' });
   }, [terminalHistory]);
 
+  const VALID_CONTEXTS = new Set(['local', 'ssh', 'mysql']);
+
   const handleSend = useCallback(async (text: string = input) => {
     const trimmed = text.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || isLoading || !sessionReady) return;
 
     const userMsg: ChatMessage = {
       id: Date.now().toString(), role: 'user',
@@ -139,12 +144,16 @@ const App: React.FC = () => {
         type: data.type, data, timestamp: new Date(),
       };
 
-      if (data.type === 'terminal_action' && data.terminal_output) {
+      if (data.type === 'terminal_action' && Array.isArray(data.terminal_output)) {
         setTerminalHistory(prev => [...prev, ...data.terminal_output]);
-        if (data.context) setCurrentContext(data.context);
+        if (typeof data.context === 'string' && VALID_CONTEXTS.has(data.context)) {
+          setCurrentContext(data.context as 'local' | 'ssh' | 'mysql');
+        }
       }
 
-      if (data.coral_sources?.length) setCoralSources(data.coral_sources);
+      if (Array.isArray(data.coral_sources) && data.coral_sources.length) {
+        setCoralSources(data.coral_sources);
+      }
 
       setMessages(prev => [...prev, botMsg]);
     } catch {
@@ -156,7 +165,7 @@ const App: React.FC = () => {
     } finally {
       setActiveRequests(prev => Math.max(0, prev - 1));
     }
-  }, [input, isLoading]);
+  }, [input, isLoading, sessionReady]);
 
   /* ── Render Markdown-lite ─────────────────────────────── */
 
@@ -271,7 +280,7 @@ const App: React.FC = () => {
               <button
                 key={action.label}
                 onClick={() => handleSend(action.label)}
-                disabled={isLoading}
+                disabled={isLoading || !sessionReady}
                 className={cn(
                   "whitespace-nowrap text-[9px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-md border flex items-center gap-1 transition-all disabled:opacity-30",
                   CATEGORY_COLORS[action.category]
@@ -288,13 +297,13 @@ const App: React.FC = () => {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => e.key === 'Enter' && handleSend()}
-              placeholder="Ask CommanderX to execute a task..."
-              disabled={isLoading}
+              placeholder={sessionReady ? 'Ask CommanderX to execute a task...' : 'Initializing session...'}
+              disabled={isLoading || !sessionReady}
               className="flex-1 bg-transparent border-none text-sm py-1 placeholder:text-muted disabled:opacity-50"
             />
             <button
               onClick={() => handleSend()}
-              disabled={isLoading || !input.trim()}
+              disabled={isLoading || !input.trim() || !sessionReady}
               className="p-2 bg-gradient-to-r from-coral to-primary-dim text-white rounded-lg shadow-lg shadow-coral/20 disabled:opacity-30 transition-opacity"
             >
               <Send className="w-4 h-4" />
