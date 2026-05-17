@@ -55,13 +55,15 @@ const App: React.FC = () => {
     }
   ]);
   const [input, setInput] = useState('');
-  const [analyzing, setAnalyzing] = useState(false);
+  const [activeRequests, setActiveRequests] = useState(0);
+  const analyzing = activeRequests > 0;
   const [terminalHistory, setTerminalHistory] = useState<string[]>(['$ _']);
   const [currentContext, setCurrentContext] = useState<'local' | 'ssh' | 'mysql'>('local');
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sessionId = useRef(Date.now().toString() + Math.random().toString(36).substring(7));
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
@@ -83,10 +85,13 @@ const App: React.FC = () => {
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
-    setAnalyzing(true);
+    setActiveRequests(prev => prev + 1);
 
     try {
-      const response = await axios.post('http://localhost:8000/chat', { message: text });
+      const response = await axios.post('http://localhost:8000/chat', { 
+        message: text,
+        session_id: sessionId.current 
+      });
       const botMessage: ChatMessage = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
@@ -105,7 +110,7 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Chat failed', error);
     } finally {
-      setAnalyzing(false);
+      setActiveRequests(prev => Math.max(0, prev - 1));
     }
   };
 

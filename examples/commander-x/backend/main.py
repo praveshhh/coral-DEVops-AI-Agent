@@ -15,31 +15,26 @@ app.add_middleware(
 )
 
 # Advanced Session State
-session_state = {
-    "current_context": "local", 
-    "awaiting": None, # pem, rds_endpoint, db_creds
-    "inventory": {
-        "databases": ["production_db", "user_service_db", "analytics_vault"],
-        "tables": ["users", "sessions", "transactions", "audit_logs"]
-    }
-}
+sessions = {}
 
 @app.post("/chat")
 async def chat_handler(data: Dict):
     message = data.get("message", "")
+    session_id = data.get("session_id", "default")
     message_lower = message.lower()
-    global session_state
+    
+    session_state = sessions.setdefault(session_id, {
+        "current_context": "local", 
+        "awaiting": None, # pem, rds_endpoint, db_creds
+        "inventory": {
+            "databases": ["production_db", "user_service_db", "analytics_vault"],
+            "tables": ["users", "sessions", "transactions", "audit_logs"]
+        }
+    })
     
     await asyncio.sleep(0.8)
 
-    # --- 1. HANDLE SECURITY GATE (SSH) ---
-    if "ssh" in message_lower and "aws" in message_lower:
-        session_state["awaiting"] = "pem"
-        return {
-            "type": "text",
-            "text": "🔐 SECURITY GATE: To establish an SSH connection to the AWS Ubuntu instance, please provide the name of your private key (.pem) or your IAM Access Key ID."
-        }
-
+    # STATE MACHINE ORDERING: Check `awaiting` state first
     if session_state["awaiting"] == "pem":
         session_state["awaiting"] = None
         session_state["current_context"] = "ssh"
@@ -56,17 +51,6 @@ async def chat_handler(data: Dict):
             ],
             "context": "ssh"
         }
-
-    # --- 2. HANDLE RDS LOGIN ---
-    if "mysql" in message_lower or "rds" in message_lower:
-        if session_state["current_context"] == "ssh":
-            session_state["awaiting"] = "rds_endpoint"
-            return {
-                "type": "text",
-                "text": "📊 RDS CONFIG: Please provide your RDS Endpoint (e.g., prod-db.cxyz.us-east-1.rds.amazonaws.com) to initialize the MySQL monitor."
-            }
-        else:
-            return {"type": "text", "text": "Please SSH into the server first before attempting to connect to RDS."}
 
     if session_state["awaiting"] == "rds_endpoint":
         session_state["awaiting"] = "db_pass"
@@ -89,6 +73,25 @@ async def chat_handler(data: Dict):
             ],
             "context": "mysql"
         }
+
+    # --- 1. HANDLE SECURITY GATE (SSH) ---
+    if "ssh" in message_lower and "aws" in message_lower:
+        session_state["awaiting"] = "pem"
+        return {
+            "type": "text",
+            "text": "🔐 SECURITY GATE: To establish an SSH connection to the AWS Ubuntu instance, please provide the name of your private key (.pem) or your IAM Access Key ID."
+        }
+
+    # --- 2. HANDLE RDS LOGIN ---
+    if "mysql" in message_lower or "rds" in message_lower:
+        if session_state["current_context"] == "ssh":
+            session_state["awaiting"] = "rds_endpoint"
+            return {
+                "type": "text",
+                "text": "📊 RDS CONFIG: Please provide your RDS Endpoint (e.g., prod-db.cxyz.us-east-1.rds.amazonaws.com) to initialize the MySQL monitor."
+            }
+        else:
+            return {"type": "text", "text": "Please SSH into the server first before attempting to connect to RDS."}
 
     # --- 3. DATABASE INSPECTION ---
     if session_state["current_context"] == "mysql":
