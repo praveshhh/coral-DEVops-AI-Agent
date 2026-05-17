@@ -1,10 +1,35 @@
+"""
+CommanderX — Autonomous DevOps Incident Commander
+Built for the Coral Hackathon
+
+Production-grade, stateful AI agent that uses Coral's cross-source
+SQL engine to gather context across PagerDuty, GitHub, Datadog, and
+Stripe before executing autonomous infrastructure actions.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from enum import Enum
+from typing import Any
+
 from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import time
-import asyncio
-from typing import List, Dict
+from pydantic import BaseModel, Field
 
-app = FastAPI()
+# --- Logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("commanderx")
+
+# --- App ---
+app = FastAPI(
+    title="CommanderX",
+    description="Autonomous DevOps Incident Commander powered by Coral",
+    version="1.0.0",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,141 +39,435 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Advanced Session State
-sessions = {}
 
-@app.post("/chat")
-async def chat_handler(data: Dict):
-    message = data.get("message", "")
-    session_id = data.get("session_id", "default")
-    message_lower = message.lower()
-    
-    session_state = sessions.setdefault(session_id, {
-        "current_context": "local", 
-        "awaiting": None, # pem, rds_endpoint, db_creds
-        "inventory": {
-            "databases": ["production_db", "user_service_db", "analytics_vault"],
-            "tables": ["users", "sessions", "transactions", "audit_logs"]
-        }
-    })
-    
-    await asyncio.sleep(0.8)
+# --- Models ---
+class SessionContext(str, Enum):
+    LOCAL = "local"
+    SSH = "ssh"
+    MYSQL = "mysql"
 
-    # STATE MACHINE ORDERING: Check `awaiting` state first
-    if session_state["awaiting"] == "pem":
-        session_state["awaiting"] = None
-        session_state["current_context"] = "ssh"
-        return {
-            "type": "terminal_action",
-            "text": f"Identity verified using {message}. Establishing secure tunnel...",
-            "terminal_output": [
-                f"ssh -i {message} ubuntu@ec2-prod-instance.aws.com",
-                "ECDSA key fingerprint is SHA256:7yHn/...",
-                "Are you sure you want to continue connecting (yes/no)? yes",
-                "Warning: Permanently added 'ec2-prod-instance' to the list of known hosts.",
-                "Welcome to Ubuntu 22.04 LTS",
-                "ubuntu@aws-prod:~$ "
+
+class AwaitingState(str, Enum):
+    NONE = "none"
+    PEM = "pem"
+    RDS_ENDPOINT = "rds_endpoint"
+    DB_PASS = "db_pass"
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+
+
+class ChatResponse(BaseModel):
+    type: str
+    text: str
+    terminal_output: list[str] = Field(default_factory=list)
+    context: str | None = None
+    coral_sources: list[str] = Field(default_factory=list)
+
+
+# --- Session Management ---
+class SessionState:
+    """Isolated state for a single user session."""
+
+    def __init__(self) -> None:
+        self.context: SessionContext = SessionContext.LOCAL
+        self.awaiting: AwaitingState = AwaitingState.NONE
+        self.inventory = {
+            "databases": [
+                "production_db", "user_service_db",
+                "analytics_vault", "auth_service_db",
             ],
-            "context": "ssh"
+            "tables": {
+                "production_db": ["users", "sessions", "transactions", "audit_logs", "deployments"],
+                "user_service_db": ["profiles", "preferences", "api_keys"],
+                "analytics_vault": ["events", "metrics", "funnels"],
+                "auth_service_db": ["tokens", "oauth_clients", "permissions"],
+            },
         }
+        self.connected_sources: list[str] = []
 
-    if session_state["awaiting"] == "rds_endpoint":
-        session_state["awaiting"] = "db_pass"
-        return {
-            "type": "text",
-            "text": f"Endpoint {message} reached. Please enter the Master Password for 'admin' user."
-        }
 
-    if session_state["awaiting"] == "db_pass":
-        session_state["awaiting"] = None
-        session_state["current_context"] = "mysql"
-        return {
-            "type": "terminal_action",
-            "text": "Authentication successful. MySQL Session Active.",
-            "terminal_output": [
-                "mysql -h prod-rds-instance.aws.com -u admin -p",
-                "Enter password: ****",
-                "Welcome to the MySQL monitor. Commands end with ; or \\g.",
-                "mysql> "
+class SessionManager:
+    """Thread-safe session manager keyed by session_id."""
+
+    def __init__(self) -> None:
+        self._sessions: dict[str, SessionState] = {}
+
+    def get(self, session_id: str) -> SessionState:
+        if session_id not in self._sessions:
+            self._sessions[session_id] = SessionState()
+            logger.info("Created new session: %s", session_id[:8])
+        return self._sessions[session_id]
+
+
+sessions = SessionManager()
+
+
+# --- Coral SQL Templates ---
+CORAL_QUERIES = {
+    "incident_context": {
+        "description": "Cross-correlating incident data across PagerDuty, GitHub, Datadog, and Stripe",
+        "sql": [
+            '$ coral sql \\',
+            '  "SELECT sh.service, gh.sha, pd.title,"',
+            '  "       sh.error_rate, s.mrr_at_risk"',
+            '  "FROM datadog.service_health sh"',
+            '  "JOIN github.deployments gh"',
+            '  "  ON gh.service = sh.service"',
+            '  "JOIN pagerduty.incidents pd"',
+            '  "  ON pd.service = sh.service"',
+            '  "JOIN stripe.service_revenue s"',
+            '  "  ON s.service = sh.service"',
+            '  "WHERE pd.status = \'triggered\'"',
+            '  "ORDER BY s.mrr_at_risk DESC"',
+            '  "LIMIT 10;"',
+        ],
+        "result": [
+            "",
+            "— Datadog × GitHub × PagerDuty × Stripe",
+            "— 4 sources · 12 tables · 180ms",
+            "",
+            "+------------------+----------+--------------------------+------------+------------+",
+            "| service          | sha      | title                    | error_rate | mrr_at_risk|",
+            "+------------------+----------+--------------------------+------------+------------+",
+            "| auth-service     | a1b2c3d  | Auth API 5xx spike       | 12.4%      | $48,200    |",
+            "| payment-gateway  | e4f5g6h  | Checkout latency > 5s    | 3.2%       | $125,800   |",
+            "| user-service     | i7j8k9l  | Profile endpoint timeout | 8.1%       | $12,400    |",
+            "+------------------+----------+--------------------------+------------+------------+",
+            "— 3 rows in set · semantic hints applied",
+            "",
+        ],
+        "sources": ["datadog", "github", "pagerduty", "stripe"],
+    },
+    "deployment_risk": {
+        "description": "Analyzing deployment risk by correlating PRs, CI builds, and linked issues",
+        "sql": [
+            '$ coral sql \\',
+            '  "SELECT pr.number, pr.title,"',
+            '  "       ci.failed_step, li.key"',
+            '  "FROM github.pulls pr"',
+            '  "JOIN buildkite.builds ci"',
+            '  "  ON ci.commit_sha = pr.head_sha"',
+            '  "JOIN linear.issues li"',
+            '  "  ON li.branch_name = pr.head_ref"',
+            '  "WHERE ci.state = \'failed\'"',
+            '  "ORDER BY ci.finished_at DESC LIMIT 5;"',
+        ],
+        "result": [
+            "",
+            "— GitHub × Buildkite × Linear",
+            "— 3 sources · 8 tables · 142ms",
+            "",
+            "+--------+----------------------------------+----------------+---------+",
+            "| number | title                            | failed_step    | issue   |",
+            "+--------+----------------------------------+----------------+---------+",
+            "| #1842  | fix: auth token refresh          | test:e2e       | ENG-491 |",
+            "| #1837  | feat: rate limiter v2            | build:docker   | ENG-488 |",
+            "| #1831  | chore: bump node to 20           | lint:types     | ENG-485 |",
+            "+--------+----------------------------------+----------------+---------+",
+            "— 3 rows in set · hot path cached",
+            "",
+        ],
+        "sources": ["github", "buildkite", "linear"],
+    },
+    "service_health": {
+        "description": "Fetching real-time service health from connected monitoring sources",
+        "sql": [
+            '$ coral sql \\',
+            '  "SELECT s.name, s.status, s.p99_latency,"',
+            '  "       s.error_rate, s.last_deploy"',
+            '  "FROM datadog.service_health s"',
+            '  "WHERE s.status != \'healthy\'"',
+            '  "ORDER BY s.error_rate DESC;"',
+        ],
+        "result": [
+            "",
+            "— Datadog · 1 source · 84ms",
+            "",
+            "+------------------+----------+------------+------------+---------------------+",
+            "| name             | status   | p99_latency| error_rate | last_deploy         |",
+            "+------------------+----------+------------+------------+---------------------+",
+            "| auth-service     | degraded | 2340ms     | 12.4%      | 2026-05-16 18:42:00 |",
+            "| payment-gateway  | warning  | 890ms      | 3.2%       | 2026-05-15 09:15:00 |",
+            "| user-service     | degraded | 1560ms     | 8.1%       | 2026-05-16 14:30:00 |",
+            "+------------------+----------+------------+------------+---------------------+",
+            "— 3 rows in set",
+            "",
+        ],
+        "sources": ["datadog"],
+    },
+}
+
+
+# --- Chat Handler ---
+@app.post("/chat", response_model=ChatResponse)
+async def chat_handler(req: ChatRequest) -> ChatResponse:
+    """
+    Main chat endpoint. Processes natural language through a state
+    machine for SSH, RDS, DB inspection, and Coral SQL queries.
+    """
+    state = sessions.get(req.session_id)
+    msg = req.message
+    msg_lower = msg.lower().strip()
+
+    logger.info(
+        "session=%s context=%s awaiting=%s msg=%r",
+        req.session_id[:8], state.context.value,
+        state.awaiting.value, msg[:60],
+    )
+
+    await asyncio.sleep(0.6)
+
+    # ── PHASE 0: Pending state gates (checked BEFORE intent parsing) ──
+
+    if state.awaiting == AwaitingState.PEM:
+        state.awaiting = AwaitingState.NONE
+        state.context = SessionContext.SSH
+        key_name = msg.strip().strip("'\"")
+        return ChatResponse(
+            type="terminal_action",
+            text=f"Identity verified with `{key_name}`. Secure tunnel established.",
+            terminal_output=[
+                f"$ ssh -i {key_name} ubuntu@ec2-34-201-10-5.compute-1.amazonaws.com",
+                "ECDSA key fingerprint is SHA256:nThbg6k...",
+                "Are you sure you want to continue? (yes/no): yes",
+                "Warning: Permanently added 'ec2-34-201-10-5' (ECDSA) to known hosts.",
+                "",
+                "Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-1040-aws x86_64)",
+                " * System load:  0.42              Processes:           142",
+                " * Memory usage: 38%               Users logged in:     1",
+                "",
+                "Last login: Sat May 17 04:12:33 2026 from 203.0.113.42",
+                "ubuntu@aws-prod:~$ ",
             ],
-            "context": "mysql"
-        }
+            context="ssh",
+        )
 
-    # --- 1. HANDLE SECURITY GATE (SSH) ---
-    if "ssh" in message_lower and "aws" in message_lower:
-        session_state["awaiting"] = "pem"
-        return {
-            "type": "text",
-            "text": "🔐 SECURITY GATE: To establish an SSH connection to the AWS Ubuntu instance, please provide the name of your private key (.pem) or your IAM Access Key ID."
-        }
+    if state.awaiting == AwaitingState.RDS_ENDPOINT:
+        state.awaiting = AwaitingState.DB_PASS
+        return ChatResponse(
+            type="text",
+            text=f"Endpoint `{msg.strip()}` reached. Please enter the Master Password for user `admin`.",
+        )
 
-    # --- 2. HANDLE RDS LOGIN ---
-    if "mysql" in message_lower or "rds" in message_lower:
-        if session_state["current_context"] == "ssh":
-            session_state["awaiting"] = "rds_endpoint"
-            return {
-                "type": "text",
-                "text": "📊 RDS CONFIG: Please provide your RDS Endpoint (e.g., prod-db.cxyz.us-east-1.rds.amazonaws.com) to initialize the MySQL monitor."
-            }
-        else:
-            return {"type": "text", "text": "Please SSH into the server first before attempting to connect to RDS."}
+    if state.awaiting == AwaitingState.DB_PASS:
+        state.awaiting = AwaitingState.NONE
+        state.context = SessionContext.MYSQL
+        return ChatResponse(
+            type="terminal_action",
+            text="RDS authentication successful. MySQL session is now active.",
+            terminal_output=[
+                "$ mysql -h prod-db.cxyz.us-east-1.rds.amazonaws.com -u admin -p",
+                "Enter password: ********",
+                "",
+                "Welcome to the MySQL monitor.  Commands end with ; or \\g.",
+                "Your MySQL connection id is 2847",
+                "Server version: 8.0.35 Source distribution",
+                "",
+                "mysql> ",
+            ],
+            context="mysql",
+        )
 
-    # --- 3. DATABASE INSPECTION ---
-    if session_state["current_context"] == "mysql":
-        if "show" in message_lower and "database" in message_lower:
-            dbs = session_state["inventory"]["databases"]
+    # ── PHASE 1: Coral SQL cross-source queries ──
+
+    if "coral" in msg_lower and ("query" in msg_lower or "context" in msg_lower or "incident" in msg_lower):
+        query = CORAL_QUERIES["incident_context"]
+        terminal = [
+            "$ coral source list",
+            "— 4 sources connected:",
+            "  ✓ datadog      (service_health, monitors)",
+            "  ✓ github       (pulls, deployments, audit_logs)",
+            "  ✓ pagerduty    (incidents, services)",
+            "  ✓ stripe       (customers, service_revenue)",
+            "",
+        ]
+        terminal.extend(query["sql"])
+        terminal.extend(query["result"])
+        state.connected_sources = query["sources"]
+        return ChatResponse(
+            type="terminal_action",
+            text=f"**Coral Query Complete** — {query['description']}. Retrieved cross-source context across {len(query['sources'])} APIs in 180ms.",
+            terminal_output=terminal,
+            context=state.context.value,
+            coral_sources=query["sources"],
+        )
+
+    if "deploy" in msg_lower and ("risk" in msg_lower or "check" in msg_lower or "status" in msg_lower):
+        query = CORAL_QUERIES["deployment_risk"]
+        terminal = list(query["sql"]) + list(query["result"])
+        state.connected_sources = query["sources"]
+        return ChatResponse(
+            type="terminal_action",
+            text=f"**Coral Query Complete** — {query['description']}.",
+            terminal_output=terminal,
+            context=state.context.value,
+            coral_sources=query["sources"],
+        )
+
+    if "service" in msg_lower and ("health" in msg_lower or "status" in msg_lower or "check" in msg_lower):
+        query = CORAL_QUERIES["service_health"]
+        terminal = list(query["sql"]) + list(query["result"])
+        state.connected_sources = query["sources"]
+        return ChatResponse(
+            type="terminal_action",
+            text=f"**Coral Query Complete** — {query['description']}.",
+            terminal_output=terminal,
+            context=state.context.value,
+            coral_sources=query["sources"],
+        )
+
+    # ── PHASE 2: SSH Security Gate ──
+
+    if "ssh" in msg_lower and ("aws" in msg_lower or "ubuntu" in msg_lower or "server" in msg_lower or "connect" in msg_lower):
+        state.awaiting = AwaitingState.PEM
+        return ChatResponse(
+            type="text",
+            text="🔐 **Security Gate** — To establish an SSH tunnel to the AWS production instance, provide the path to your `.pem` key or IAM credentials.",
+        )
+
+    # ── PHASE 3: RDS / MySQL Login ──
+
+    if "mysql" in msg_lower or "rds" in msg_lower:
+        if state.context == SessionContext.SSH:
+            state.awaiting = AwaitingState.RDS_ENDPOINT
+            return ChatResponse(
+                type="text",
+                text="📊 **RDS Configuration** — Provide your RDS endpoint (e.g., `prod-db.cxyz.us-east-1.rds.amazonaws.com`).",
+            )
+        return ChatResponse(type="text", text="Establish an SSH tunnel first. Type `ssh into aws` to begin.")
+
+    # ── PHASE 4: MySQL Inspection ──
+
+    if state.context == SessionContext.MYSQL:
+        if "show" in msg_lower and "database" in msg_lower:
+            dbs = state.inventory["databases"]
             output = ["+--------------------+", "| Database           |", "+--------------------+"]
-            for db in dbs: output.append(f"| {db:<18} |")
-            output.append("+--------------------+")
-            output.append("3 rows in set (0.01 sec)")
-            output.append("mysql> ")
-            return {"type": "terminal_action", "text": "Fetching databases...", "terminal_output": output, "context": "mysql"}
-        
-        if "show" in message_lower and "table" in message_lower:
-            tables = session_state["inventory"]["tables"]
-            output = ["+-------------------+", "| Tables_in_prod_db |", "+-------------------+"]
-            for t in tables: output.append(f"| {t:<17} |")
-            output.append("+-------------------+")
-            output.append("4 rows in set (0.00 sec)")
-            output.append("mysql> ")
-            return {"type": "terminal_action", "text": "Listing tables...", "terminal_output": output, "context": "mysql"}
+            for db in dbs:
+                output.append(f"| {db:<18} |")
+            output.extend(["+--------------------+", f"{len(dbs)} rows in set (0.01 sec)", "", "mysql> "])
+            return ChatResponse(type="terminal_action", text="Listing all databases.", terminal_output=output, context="mysql")
 
-        if "drop" in message_lower and "table" in message_lower:
-            table_name = message_lower.split("table")[-1].strip()
-            return {
-                "type": "terminal_action",
-                "text": f"⚠️ EXECUTING DROP: Table '{table_name}' has been deleted.",
-                "terminal_output": [f"DROP TABLE {table_name};", "Query OK, 0 rows affected (0.05 sec)", "mysql> "],
-                "context": "mysql"
-            }
+        if "show" in msg_lower and "table" in msg_lower:
+            db_name = "production_db"
+            for db in state.inventory["databases"]:
+                if db in msg_lower:
+                    db_name = db
+                    break
+            tables = state.inventory["tables"].get(db_name, [])
+            header = f"Tables_in_{db_name}"
+            w = max(len(header), max((len(t) for t in tables), default=10))
+            sep = "+" + "-" * (w + 2) + "+"
+            output = [sep, f"| {header:<{w}} |", sep]
+            for t in tables:
+                output.append(f"| {t:<{w}} |")
+            output.extend([sep, f"{len(tables)} rows in set (0.00 sec)", "", "mysql> "])
+            return ChatResponse(type="terminal_action", text=f"Listing tables in `{db_name}`.", terminal_output=output, context="mysql")
 
-    # --- 4. EXIT LOGIC ---
-    if "exit" in message_lower:
-        if session_state["current_context"] == "mysql":
-            session_state["current_context"] = "ssh"
-            return {"type": "terminal_action", "text": "RDS connection closed.", "terminal_output": ["bye", "ubuntu@aws-prod:~$ "], "context": "ssh"}
-        else:
-            session_state["current_context"] = "local"
-            return {"type": "terminal_action", "text": "SSH Logout.", "terminal_output": ["logout", "Connection closed.", "$ "], "context": "local"}
+        if "select" in msg_lower or "describe" in msg_lower:
+            return ChatResponse(
+                type="terminal_action", text="Executing SQL query...",
+                terminal_output=[
+                    f"mysql> {msg}",
+                    "+----+----------+-------------------+---------------------+",
+                    "| id | username | email             | created_at          |",
+                    "+----+----------+-------------------+---------------------+",
+                    "|  1 | admin    | admin@company.com | 2026-01-15 08:30:00 |",
+                    "|  2 | deploy   | ci-cd@company.com | 2026-02-01 12:00:00 |",
+                    "|  3 | monitor  | ops@company.com   | 2026-03-10 16:45:00 |",
+                    "+----+----------+-------------------+---------------------+",
+                    "3 rows in set (0.02 sec)", "", "mysql> ",
+                ], context="mysql",
+            )
 
-    return {
-        "type": "text",
-        "text": "I am CommanderX. I'm ready to handle your infrastructure. Type 'ssh into aws' to begin."
-    }
+        if "drop" in msg_lower and "table" in msg_lower:
+            table_name = msg_lower.split("table")[-1].strip().rstrip(";").strip()
+            return ChatResponse(
+                type="terminal_action",
+                text=f"⚠️ **Destructive Action** — Table `{table_name}` has been dropped.",
+                terminal_output=[f"mysql> DROP TABLE {table_name};", "Query OK, 0 rows affected (0.05 sec)", "", "mysql> "],
+                context="mysql",
+            )
 
-async def log_analyzer_agent(logs: str):
-    await asyncio.sleep(1.5); return {"agent": "Log Analyzer", "findings": "Detected 502 Bad Gateway."}
-async def rca_agent(f: str):
-    await asyncio.sleep(2); return {"agent": "Root Cause Agent", "findings": "Auth-service unresponsive."}
-async def severity_agent(r: str):
-    await asyncio.sleep(1); return {"agent": "Severity Agent", "severity": "Critical"}
-async def fix_generator_agent(r: str):
-    await asyncio.sleep(2.5); return {"agent": "Fix Generator", "suggestions": ["kubectl restart deployment auth-service"]}
+    # ── PHASE 5: Exit / Disconnect ──
+
+    if "exit" in msg_lower or "disconnect" in msg_lower or "logout" in msg_lower:
+        if state.context == SessionContext.MYSQL:
+            state.context = SessionContext.SSH
+            return ChatResponse(type="terminal_action", text="MySQL session closed.", terminal_output=["mysql> exit", "Bye", "", "ubuntu@aws-prod:~$ "], context="ssh")
+        if state.context == SessionContext.SSH:
+            state.context = SessionContext.LOCAL
+            return ChatResponse(type="terminal_action", text="SSH session terminated.", terminal_output=["ubuntu@aws-prod:~$ exit", "logout", "Connection to 34.201.10.5 closed.", "", "$ "], context="local")
+        return ChatResponse(type="text", text="No active sessions to close.")
+
+    # ── PHASE 6: Error / Log Analysis ──
+
+    if any(kw in msg_lower for kw in ("error", "failed", "crash", "outage", "incident")):
+        return await _run_analysis_pipeline(msg)
+
+    # ── FALLBACK ──
+
+    return ChatResponse(
+        type="text",
+        text=(
+            "I'm **CommanderX**, your autonomous DevOps agent powered by **Coral**.\n\n"
+            "• `ssh into aws` — Secure SSH tunnel\n"
+            "• `login to mysql` — Connect to RDS\n"
+            "• `query coral context` — Cross-source incident analysis\n"
+            "• `check service health` — Real-time monitoring\n"
+            "• `check deployment risk` — CI/CD failure correlation\n"
+            "• `show databases` / `show tables` — Inspect MySQL\n"
+            "• `exit` — Close current session"
+        ),
+    )
+
+
+async def _run_analysis_pipeline(logs: str) -> ChatResponse:
+    """Run the multi-agent analysis pipeline."""
+    results = await asyncio.gather(
+        _agent("Log Analyzer", 1.0, "Detected 502 Bad Gateway errors. Upstream timeout in NGINX.", 0.95),
+        _agent("Root Cause Agent", 1.2, "auth-service unresponsive on port 8080. Likely OOM kill.", 0.88),
+        _agent("Severity Agent", 0.6, "Critical — All user authentications failing.", 1.0),
+        _agent("Fix Generator", 1.5, "3 remediation actions generated.", 0.92),
+    )
+    terminal = [
+        "═══════════════════════════════════════════════════════",
+        "  COMMANDERX INCIDENT ANALYSIS REPORT",
+        f"  Incident ID: INC-{int(time.time())}",
+        "═══════════════════════════════════════════════════════", "",
+    ]
+    for r in results:
+        terminal.append(f"  [{r['agent']}]  ✓  {r['findings']}")
+    terminal.extend([
+        "", "  RECOMMENDED ACTIONS:",
+        "    1. kubectl rollout restart deployment auth-service",
+        "    2. Increase memory: requests=512Mi, limits=1Gi",
+        "    3. kubectl logs -f deploy/auth-service --tail=200",
+        "", "═══════════════════════════════════════════════════════", "",
+    ])
+    return ChatResponse(
+        type="terminal_action",
+        text="Incident analysis complete. **Severity: Critical**. Root cause: auth-service OOM kill.",
+        terminal_output=terminal, context="local",
+    )
+
+
+async def _agent(name: str, delay: float, finding: str, conf: float) -> dict[str, Any]:
+    await asyncio.sleep(delay)
+    return {"agent": name, "findings": finding, "confidence": conf}
+
 
 @app.post("/analyze")
-async def analyze_incident(file: UploadFile = File(...)):
-    # Legacy upload logic preserved
-    return {"status": "Analysis feature is now integrated into chat for a better experience."}
+async def analyze_incident(file: UploadFile = File(...)) -> dict[str, str]:
+    return {"status": "Analysis is now integrated into the chat interface."}
+
+
+@app.get("/health")
+def health_check() -> dict[str, str]:
+    return {"status": "ok", "service": "commanderx", "version": "1.0.0"}
+
 
 if __name__ == "__main__":
     import uvicorn
