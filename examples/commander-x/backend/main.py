@@ -10,15 +10,22 @@ Stripe before executing autonomous infrastructure actions.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import os
+import secrets
 import time
 import uuid
 from enum import Enum
 from typing import Any
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+# Server-side secret for signing session tokens (generated once per process)
+_SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -56,7 +63,7 @@ class AwaitingState(str, Enum):
 
 class ChatRequest(BaseModel):
     message: str
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    session_id: str  # Must be obtained from POST /session
 
 
 class ChatResponse(BaseModel):
@@ -65,6 +72,7 @@ class ChatResponse(BaseModel):
     terminal_output: list[str] = Field(default_factory=list)
     context: str | None = None
     coral_sources: list[str] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 # --- Session Management ---
@@ -90,16 +98,32 @@ class SessionState:
 
 
 class SessionManager:
-    """Thread-safe session manager keyed by session_id."""
+    """Session manager with server-side token generation."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
 
-    def get(self, session_id: str) -> SessionState:
-        if session_id not in self._sessions:
-            self._sessions[session_id] = SessionState()
-            logger.info("Created new session: %s", session_id[:8])
-        return self._sessions[session_id]
+    def create(self) -> str:
+        """Create a new session and return a signed token."""
+        raw_id = uuid.uuid4().hex
+        sig = hmac.new(_SESSION_SECRET.encode(), raw_id.encode(), hashlib.sha256).hexdigest()[:16]
+        token = f"{raw_id}.{sig}"
+        self._sessions[token] = SessionState()
+        logger.info("Created session: %s", token[:12])
+        return token
+
+    def get(self, token: str) -> SessionState | None:
+        """Retrieve a session only if the token is valid and known."""
+        return self._sessions.get(token)
+
+    def validate(self, token: str) -> bool:
+        """Verify the token signature."""
+        parts = token.split(".", 1)
+        if len(parts) != 2:
+            return False
+        raw_id, sig = parts
+        expected = hmac.new(_SESSION_SECRET.encode(), raw_id.encode(), hashlib.sha256).hexdigest()[:16]
+        return hmac.compare_digest(sig, expected)
 
 
 sessions = SessionManager()
@@ -201,26 +225,52 @@ CORAL_QUERIES = {
 }
 
 
+# --- Session Endpoint ---
+@app.post("/session")
+async def create_session() -> dict[str, str]:
+    """Create a new server-side session and return a signed token."""
+    token = sessions.create()
+    return {"session_id": token}
+
+
 # --- Chat Handler ---
+CANCEL_KEYWORDS = frozenset({"cancel", "abort", "nevermind", "back", "reset", "help"})
+
+
 @app.post("/chat", response_model=ChatResponse)
 async def chat_handler(req: ChatRequest) -> ChatResponse:
     """
     Main chat endpoint. Processes natural language through a state
     machine for SSH, RDS, DB inspection, and Coral SQL queries.
     """
+    # Validate server-issued session token
+    if not sessions.validate(req.session_id):
+        raise HTTPException(status_code=401, detail="Invalid or expired session token.")
+
     state = sessions.get(req.session_id)
+    if state is None:
+        raise HTTPException(status_code=401, detail="Session not found. Call POST /session first.")
+
     msg = req.message
     msg_lower = msg.lower().strip()
 
     logger.info(
         "session=%s context=%s awaiting=%s msg=%r",
-        req.session_id[:8], state.context.value,
+        req.session_id[:12], state.context.value,
         state.awaiting.value, msg[:60],
     )
 
     await asyncio.sleep(0.6)
 
     # ── PHASE 0: Pending state gates (checked BEFORE intent parsing) ──
+    # Escape hatch: if user types cancel/help/back, abort the awaiting state
+    if state.awaiting != AwaitingState.NONE and msg_lower in CANCEL_KEYWORDS:
+        state.awaiting = AwaitingState.NONE
+        return ChatResponse(
+            type="text",
+            text="Action cancelled. What would you like to do next?",
+            session_id=req.session_id,
+        )
 
     if state.awaiting == AwaitingState.PEM:
         state.awaiting = AwaitingState.NONE
@@ -243,6 +293,7 @@ async def chat_handler(req: ChatRequest) -> ChatResponse:
                 "ubuntu@aws-prod:~$ ",
             ],
             context="ssh",
+            session_id=req.session_id,
         )
 
     if state.awaiting == AwaitingState.RDS_ENDPOINT:

@@ -94,7 +94,17 @@ const App: React.FC = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const sessionId = useRef(Date.now().toString() + Math.random().toString(36).substring(7));
+  const sessionId = useRef<string>('');
+
+  // Obtain a server-issued session token on mount
+  useEffect(() => {
+    axios.post('http://localhost:8000/session').then(({ data }) => {
+      sessionId.current = data.session_id;
+    }).catch(() => {
+      // Fallback: use a cryptographically random client ID
+      sessionId.current = crypto.randomUUID();
+    });
+  }, []);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
