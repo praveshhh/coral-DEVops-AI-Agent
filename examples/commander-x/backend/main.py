@@ -95,26 +95,63 @@ class SessionState:
             },
         }
         self.connected_sources: list[str] = []
+        self.created_at: float = time.time()
+
+
+# Session configuration
+_MAX_SESSIONS = 1000
+_SESSION_TTL_SECONDS = 30 * 60  # 30 minutes
 
 
 class SessionManager:
-    """Session manager with server-side token generation."""
+    """
+    In-process session manager with server-side token generation,
+    TTL-based expiry, and a hard cap to prevent memory exhaustion.
+
+    NOTE: This uses in-process storage, which is appropriate for
+    single-worker deployments (the default for this demo). For
+    multi-worker or clustered deployments, replace this with a
+    Redis-backed session store.
+    """
 
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
 
+    def _evict_expired(self) -> None:
+        """Remove sessions older than TTL."""
+        now = time.time()
+        expired = [
+            token for token, state in self._sessions.items()
+            if now - state.created_at > _SESSION_TTL_SECONDS
+        ]
+        for token in expired:
+            del self._sessions[token]
+            logger.info("Evicted expired session: %s", token[:12])
+
     def create(self) -> str:
-        """Create a new session and return a signed token."""
+        """Create a new session and return a signed token.
+
+        Raises ValueError if the session cap is reached after eviction.
+        """
+        self._evict_expired()
+        if len(self._sessions) >= _MAX_SESSIONS:
+            raise ValueError("Session limit reached. Try again later.")
         raw_id = uuid.uuid4().hex
         sig = hmac.new(_SESSION_SECRET.encode(), raw_id.encode(), hashlib.sha256).hexdigest()[:16]
         token = f"{raw_id}.{sig}"
         self._sessions[token] = SessionState()
-        logger.info("Created session: %s", token[:12])
+        logger.info("Created session: %s (active=%d)", token[:12], len(self._sessions))
         return token
 
     def get(self, token: str) -> SessionState | None:
-        """Retrieve a session only if the token is valid and known."""
-        return self._sessions.get(token)
+        """Retrieve a session only if it exists and hasn't expired."""
+        state = self._sessions.get(token)
+        if state is None:
+            return None
+        if time.time() - state.created_at > _SESSION_TTL_SECONDS:
+            del self._sessions[token]
+            return None
+        return state
 
     def validate(self, token: str) -> bool:
         """Verify the token signature."""
@@ -229,7 +266,10 @@ CORAL_QUERIES = {
 @app.post("/session")
 async def create_session() -> dict[str, str]:
     """Create a new server-side session and return a signed token."""
-    token = sessions.create()
+    try:
+        token = sessions.create()
+    except ValueError:
+        raise HTTPException(status_code=429, detail="Too many active sessions. Try again later.")
     return {"session_id": token}
 
 
