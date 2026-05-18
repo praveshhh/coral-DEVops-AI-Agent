@@ -12,20 +12,48 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
+import sqlite3
 import time
 import uuid
 from enum import Enum
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-# Server-side secret for signing session tokens (generated once per process)
-_SESSION_SECRET = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
+# Load or generate a persistent session secret
+_SESSION_SECRET = os.environ.get("SESSION_SECRET")
+if not _SESSION_SECRET:
+    secret_file = ".session_secret"
+    if os.path.exists(secret_file):
+        try:
+            with open(secret_file, "r") as f:
+                _SESSION_SECRET = f.read().strip()
+        except Exception:
+            pass
+    if not _SESSION_SECRET:
+        _SESSION_SECRET = secrets.token_hex(32)
+        try:
+            with open(secret_file, "w") as f:
+                f.write(_SESSION_SECRET)
+        except Exception:
+            pass
+
+# Load CORAL_API_KEY from environment or local .env file
+_API_KEY = os.environ.get("CORAL_API_KEY")
+if not _API_KEY and os.path.exists(".env"):
+    try:
+        with open(".env") as f:
+            for line in f:
+                if line.strip().startswith("CORAL_API_KEY="):
+                    _API_KEY = line.split("=", 1)[1].strip().strip("'\"")
+    except Exception:
+        pass
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +68,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -105,28 +133,35 @@ _SESSION_TTL_SECONDS = 30 * 60  # 30 minutes
 
 class SessionManager:
     """
-    In-process session manager with server-side token generation,
+    SQLite-backed session manager with server-side token generation,
     TTL-based expiry, and a hard cap to prevent memory exhaustion.
-
-    NOTE: This uses in-process storage, which is appropriate for
-    single-worker deployments (the default for this demo). For
-    multi-worker or clustered deployments, replace this with a
-    Redis-backed session store.
+    This enables full session sharing and validation across multiple
+    worker processes/threads.
     """
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, SessionState] = {}
+    def __init__(self, db_path: str = "sessions.db") -> None:
+        self.db_path = db_path
+        self._init_db()
+
+    def _init_db(self) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token TEXT PRIMARY KEY,
+                    state_json TEXT,
+                    created_at REAL
+                )
+            """)
 
     def _evict_expired(self) -> None:
         """Remove sessions older than TTL."""
-        now = time.time()
-        expired = [
-            token for token, state in self._sessions.items()
-            if now - state.created_at > _SESSION_TTL_SECONDS
-        ]
-        for token in expired:
-            del self._sessions[token]
-            logger.info("Evicted expired session: %s", token[:12])
+        cutoff = time.time() - _SESSION_TTL_SECONDS
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM sessions WHERE created_at < ?", (cutoff,))
+        except Exception as e:
+            logger.error("Error evicting expired sessions: %s", e)
 
     def create(self) -> str:
         """Create a new session and return a signed token.
@@ -134,24 +169,70 @@ class SessionManager:
         Raises ValueError if the session cap is reached after eviction.
         """
         self._evict_expired()
-        if len(self._sessions) >= _MAX_SESSIONS:
-            raise ValueError("Session limit reached. Try again later.")
+        
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+            count = row[0] if row else 0
+            if count >= _MAX_SESSIONS:
+                raise ValueError("Session limit reached. Try again later.")
+
         raw_id = uuid.uuid4().hex
         sig = hmac.new(_SESSION_SECRET.encode(), raw_id.encode(), hashlib.sha256).hexdigest()[:16]
         token = f"{raw_id}.{sig}"
-        self._sessions[token] = SessionState()
-        logger.info("Created session: %s (active=%d)", token[:12], len(self._sessions))
+        
+        state = SessionState()
+        state_json = json.dumps({
+            "context": state.context.value,
+            "awaiting": state.awaiting.value,
+            "inventory": state.inventory,
+            "connected_sources": state.connected_sources,
+            "created_at": state.created_at
+        })
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT INTO sessions (token, state_json, created_at) VALUES (?, ?, ?)",
+                (token, state_json, state.created_at)
+            )
+            row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+            active_count = row[0] if row else 1
+            logger.info("Created session: %s (active=%d)", token[:12], active_count)
         return token
 
     def get(self, token: str) -> SessionState | None:
         """Retrieve a session only if it exists and hasn't expired."""
-        state = self._sessions.get(token)
-        if state is None:
-            return None
-        if time.time() - state.created_at > _SESSION_TTL_SECONDS:
-            del self._sessions[token]
-            return None
-        return state
+        self._evict_expired()
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT state_json FROM sessions WHERE token = ?", (token,)).fetchone()
+            if not row:
+                return None
+            try:
+                data = json.loads(row[0])
+                state = SessionState()
+                state.context = SessionContext(data.get("context", SessionContext.LOCAL.value))
+                state.awaiting = AwaitingState(data.get("awaiting", AwaitingState.NONE.value))
+                state.inventory = data.get("inventory", state.inventory)
+                state.connected_sources = data.get("connected_sources", [])
+                state.created_at = data.get("created_at", time.time())
+                return state
+            except Exception as e:
+                logger.error("Error loading session %s: %s", token[:12], e)
+                return None
+
+    def save(self, token: str, state: SessionState) -> None:
+        """Persist state modifications back to SQLite."""
+        state_json = json.dumps({
+            "context": state.context.value,
+            "awaiting": state.awaiting.value,
+            "inventory": state.inventory,
+            "connected_sources": state.connected_sources,
+            "created_at": state.created_at
+        })
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (token, state_json, created_at) VALUES (?, ?, ?)",
+                (token, state_json, state.created_at)
+            )
 
     def validate(self, token: str) -> bool:
         """Verify the token signature."""
@@ -264,8 +345,11 @@ CORAL_QUERIES = {
 
 # --- Session Endpoint ---
 @app.post("/session")
-async def create_session() -> dict[str, str]:
+async def create_session(x_api_key: str | None = Header(None, alias="X-API-Key")) -> dict[str, str]:
     """Create a new server-side session and return a signed token."""
+    # Enforce API key authentication to prevent unauthenticated session issuance
+    if not _API_KEY or x_api_key != _API_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized API Key.")
     try:
         token = sessions.create()
     except ValueError:
@@ -291,6 +375,15 @@ async def chat_handler(req: ChatRequest) -> ChatResponse:
     if state is None:
         raise HTTPException(status_code=401, detail="Session not found. Call POST /session first.")
 
+    res = await _handle_chat_logic(req, state)
+    sessions.save(req.session_id, state)
+    
+    # Ensure session_id is returned
+    res.session_id = req.session_id
+    return res
+
+
+async def _handle_chat_logic(req: ChatRequest, state: SessionState) -> ChatResponse:
     msg = req.message
     msg_lower = msg.lower().strip()
 

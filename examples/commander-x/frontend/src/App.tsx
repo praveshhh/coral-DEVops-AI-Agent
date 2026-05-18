@@ -99,7 +99,12 @@ const App: React.FC = () => {
 
   // Obtain a server-issued session token on mount
   useEffect(() => {
-    axios.post('http://localhost:8000/session').then(({ data }) => {
+    const apiKey = import.meta.env.VITE_CORAL_API_KEY || '';
+    axios.post('http://localhost:8000/session', {}, {
+      headers: {
+        'X-API-Key': apiKey
+      }
+    }).then(({ data }) => {
       sessionId.current = data.session_id;
       setSessionReady(true);
     }).catch(() => {
@@ -128,7 +133,7 @@ const App: React.FC = () => {
       content: trimmed, timestamp: new Date(),
     };
 
-    setMessages(prev => [...prev, userMsg]);
+    setMessages(prev => [...prev, userMsg].slice(-100));
     setInput('');
     setActiveRequests(prev => prev + 1);
 
@@ -145,7 +150,7 @@ const App: React.FC = () => {
       };
 
       if (data.type === 'terminal_action' && Array.isArray(data.terminal_output)) {
-        setTerminalHistory(prev => [...prev, ...data.terminal_output]);
+        setTerminalHistory(prev => [...prev, ...data.terminal_output].slice(-500));
         if (typeof data.context === 'string' && VALID_CONTEXTS.has(data.context)) {
           setCurrentContext(data.context as 'local' | 'ssh' | 'mysql');
         }
@@ -155,13 +160,13 @@ const App: React.FC = () => {
         setCoralSources(data.coral_sources);
       }
 
-      setMessages(prev => [...prev, botMsg]);
+      setMessages(prev => [...prev, botMsg].slice(-100));
     } catch {
       setMessages(prev => [...prev, {
         id: (Date.now() + 1).toString(), role: 'assistant',
         content: '⚠️ Connection to backend failed. Ensure the server is running on port 8000.',
         timestamp: new Date(),
-      }]);
+      }].slice(-100));
     } finally {
       setActiveRequests(prev => Math.max(0, prev - 1));
     }
