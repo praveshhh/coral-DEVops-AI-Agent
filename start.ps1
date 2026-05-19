@@ -5,8 +5,8 @@ $scriptDir = $PSScriptRoot
 $apiKey = -join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object {[char]$_})
 
 # Write API key to .env files to secure endpoints and prevent unauthorized session issuance
-"VITE_CORAL_API_KEY=$apiKey" | Out-File -FilePath "$scriptDir/examples/commander-x/frontend/.env" -Encoding utf8
-"CORAL_API_KEY=$apiKey" | Out-File -FilePath "$scriptDir/examples/commander-x/backend/.env" -Encoding utf8
+"VITE_CORAL_API_KEY=$apiKey" | Out-File -FilePath "$scriptDir/examples/commander-x/frontend/.env" -Encoding ascii
+"CORAL_API_KEY=$apiKey" | Out-File -FilePath "$scriptDir/examples/commander-x/backend/.env" -Encoding ascii
 
 # Detect the current PowerShell executable (works for both powershell.exe and pwsh)
 $psExe = (Get-Process -Id $PID).Path

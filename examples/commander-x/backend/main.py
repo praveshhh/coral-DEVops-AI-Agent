@@ -48,7 +48,7 @@ if not _SESSION_SECRET:
 _API_KEY = os.environ.get("CORAL_API_KEY")
 if not _API_KEY and os.path.exists(".env"):
     try:
-        with open(".env") as f:
+        with open(".env", encoding="utf-8-sig") as f:
             for line in f:
                 if line.strip().startswith("CORAL_API_KEY="):
                     _API_KEY = line.split("=", 1)[1].strip().strip("'\"")
