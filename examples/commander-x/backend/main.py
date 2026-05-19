@@ -631,7 +631,7 @@ async def _run_analysis_pipeline(logs: str) -> ChatResponse:
         ]
         severity = "Major"
     elif "timeout" in logs_lower or "504" in logs_lower or "502" in logs_lower:
-        log_findings = "Detected Gateway Timeout (534) / Bad Gateway (502) errors."
+        log_findings = "Detected Gateway Timeout (504) / Bad Gateway (502) errors."
         rc_findings = "Upstream application service timed out. Check slow queries."
         rec_actions = [
             "1. Increase NGINX keepalive and proxy_read_timeout values",
