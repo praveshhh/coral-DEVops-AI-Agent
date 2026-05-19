@@ -1040,7 +1040,10 @@ fn build_query_pairs(
     for param in &request.query {
         let value = resolve_value_source(&param.value, render_context)?;
         if let Some(value) = value {
-            params.push((param.name.clone(), value_to_string(&value)));
+            let val_str = value_to_string(&value);
+            if !val_str.is_empty() {
+                params.push((param.name.clone(), val_str));
+            }
         }
     }
 

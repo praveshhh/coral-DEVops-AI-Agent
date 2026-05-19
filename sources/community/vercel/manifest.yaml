@@ -1,0 +1,255 @@
+name: vercel
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: >-
+  Query projects, deployments, and domains from Vercel. Enables active deployment auditing,
+  project framework analysis, custom domain mapping, and hosting telemetry correlation.
+base_url: https://api.vercel.com
+inputs:
+  VERCEL_TOKEN:
+    kind: secret
+    hint: |
+      Vercel Personal Access Token. Generate one in your Vercel Dashboard under
+      Account Settings > Tokens. Make sure it has read permissions for the projects or teams you wish to inspect.
+      The token is sent as `Authorization: Bearer <VERCEL_TOKEN>`.
+  VERCEL_TEAM_ID:
+    kind: variable
+    default: ""
+    hint: |
+      Optional Team ID. Required if you are querying resources belonging to a
+      Vercel Team rather than your personal account.
+
+auth:
+  type: HeaderAuth
+  headers:
+    - name: Authorization
+      from: template
+      template: Bearer {{input.VERCEL_TOKEN}}
+
+test_queries:
+  - SELECT id, name, framework FROM vercel.projects LIMIT 5
+  - SELECT id, url, state FROM vercel.deployments LIMIT 5
+  - SELECT name, verified FROM vercel.domains LIMIT 5
+
+tables:
+  # ------------------------------------------------------------------
+  # vercel.projects — list projects in your account/team
+  # GET /v9/projects
+  # ------------------------------------------------------------------
+  - name: projects
+    description: |
+      List Vercel projects. Use the projects table to query framework types,
+      repository links, and latest deployment statuses.
+    fetch_limit_default: 20
+    request:
+      method: GET
+      path: /v9/projects
+      query:
+        - name: teamId
+          from: input
+          key: VERCEL_TEAM_ID
+    response:
+      rows_path: [projects]
+    pagination:
+      mode: cursor_query
+      page_size:
+        default: 20
+        max: 100
+        query_param: limit
+      cursor_param: until
+      response_cursor_path: [pagination, next]
+    columns:
+      - name: id
+        type: Utf8
+        nullable: false
+        description: Unique project identifier.
+        expr:
+          kind: path
+          path: [id]
+      - name: name
+        type: Utf8
+        nullable: false
+        description: Name of the project.
+        expr:
+          kind: path
+          path: [name]
+      - name: framework
+        type: Utf8
+        nullable: true
+        description: The framework associated with this project (e.g., nextjs, gatsby, vite).
+        expr:
+          kind: path
+          path: [framework]
+      - name: node_version
+        type: Utf8
+        nullable: true
+        description: Node.js version configured for the project.
+        expr:
+          kind: path
+          path: [nodeVersion]
+      - name: account_id
+        type: Utf8
+        nullable: true
+        description: The ID of the owner account.
+        expr:
+          kind: path
+          path: [accountId]
+      - name: created_at
+        type: Timestamp
+        nullable: false
+        description: Timestamp when the project was created.
+        expr:
+          kind: format_timestamp
+          input: milliseconds
+          expr:
+            kind: path
+            path: [createdAt]
+      - name: updated_at
+        type: Timestamp
+        nullable: false
+        description: Timestamp when the project was last updated.
+        expr:
+          kind: format_timestamp
+          input: milliseconds
+          expr:
+            kind: path
+            path: [updatedAt]
+
+  # ------------------------------------------------------------------
+  # vercel.deployments — list deployments for a project or team
+  # GET /v6/deployments
+  # ------------------------------------------------------------------
+  - name: deployments
+    description: |
+      List deployments under a Vercel project or team. Supports optional `project_id` filter.
+    filters:
+      - name: project_id
+    fetch_limit_default: 20
+    request:
+      method: GET
+      path: /v6/deployments
+      query:
+        - name: teamId
+          from: input
+          key: VERCEL_TEAM_ID
+        - name: projectId
+          from: filter
+          key: project_id
+    response:
+      rows_path: [deployments]
+    pagination:
+      mode: cursor_query
+      page_size:
+        default: 20
+        max: 100
+        query_param: limit
+      cursor_param: until
+      response_cursor_path: [pagination, next]
+    columns:
+      - name: id
+        type: Utf8
+        nullable: false
+        description: Unique deployment identifier.
+        expr:
+          kind: path
+          path: [uid]
+      - name: name
+        type: Utf8
+        nullable: false
+        description: The project name associated with this deployment.
+        expr:
+          kind: path
+          path: [name]
+      - name: url
+        type: Utf8
+        nullable: false
+        description: The URL of the deployment.
+        expr:
+          kind: path
+          path: [url]
+      - name: state
+        type: Utf8
+        nullable: false
+        description: The deployment state (e.g., READY, BUILDING, ERROR, QUEUED).
+        expr:
+          kind: path
+          path: [state]
+      - name: creator_username
+        type: Utf8
+        nullable: true
+        description: Username of the team member who triggered the deployment.
+        expr:
+          kind: path
+          path: [creator, username]
+      - name: created_at
+        type: Timestamp
+        nullable: false
+        description: Timestamp when the deployment was created.
+        expr:
+          kind: format_timestamp
+          input: milliseconds
+          expr:
+            kind: path
+            path: [createdAt]
+
+  # ------------------------------------------------------------------
+  # vercel.domains — list domains registered or active in your Vercel account
+  # GET /v5/domains
+  # ------------------------------------------------------------------
+  - name: domains
+    description: |
+      List Vercel domains configured for custom routing.
+    fetch_limit_default: 20
+    request:
+      method: GET
+      path: /v5/domains
+      query:
+        - name: teamId
+          from: input
+          key: VERCEL_TEAM_ID
+    response:
+      rows_path: [domains]
+    pagination:
+      mode: cursor_query
+      page_size:
+        default: 20
+        max: 100
+        query_param: limit
+      cursor_param: until
+      response_cursor_path: [pagination, next]
+    columns:
+      - name: name
+        type: Utf8
+        nullable: false
+        description: Domain name.
+        expr:
+          kind: path
+          path: [name]
+      - name: verified
+        type: Boolean
+        nullable: false
+        description: Whether the domain configuration is verified.
+        expr:
+          kind: path
+          path: [verified]
+      - name: created_at
+        type: Timestamp
+        nullable: false
+        description: Timestamp when the domain was added.
+        expr:
+          kind: format_timestamp
+          input: milliseconds
+          expr:
+            kind: path
+            path: [createdAt]
+      - name: expires_at
+        type: Timestamp
+        nullable: true
+        description: Timestamp when the domain registration expires.
+        expr:
+          kind: format_timestamp
+          input: milliseconds
+          expr:
+            kind: path
+            path: [expiresAt]
