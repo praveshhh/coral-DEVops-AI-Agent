@@ -610,11 +610,51 @@ async def _handle_chat_logic(req: ChatRequest, state: SessionState) -> ChatRespo
 
 async def _run_analysis_pipeline(logs: str) -> ChatResponse:
     """Run the multi-agent analysis pipeline."""
+    logs_lower = logs.lower()
+    
+    if "oom" in logs_lower or "memory" in logs_lower:
+        log_findings = "Detected critical Out-Of-Memory (OOM) event in container logs."
+        rc_findings = "auth-service crashed due to exceeding cgroup memory limit."
+        rec_actions = [
+            "1. Increase memory limits in deployment specs (limits=1Gi)",
+            "2. kubectl rollout restart deployment auth-service",
+            "3. Check for memory leaks using heap profiles"
+        ]
+        severity = "Critical"
+    elif "mysql" in logs_lower or "database" in logs_lower or "db" in logs_lower:
+        log_findings = "Connection timeout detected while reaching database endpoint."
+        rc_findings = "MySQL database host unreachable. Check security group inbound rules."
+        rec_actions = [
+            "1. Verify RDS security group allows port 3306 inbound",
+            "2. Check db-service status and connection pool limit",
+            "3. Restart the proxy tunnel or VPN client"
+        ]
+        severity = "Major"
+    elif "timeout" in logs_lower or "504" in logs_lower or "502" in logs_lower:
+        log_findings = "Detected Gateway Timeout (534) / Bad Gateway (502) errors."
+        rc_findings = "Upstream application service timed out. Check slow queries."
+        rec_actions = [
+            "1. Increase NGINX keepalive and proxy_read_timeout values",
+            "2. Verify backend worker pool saturation",
+            "3. Scale application replicas horizontally"
+        ]
+        severity = "Critical"
+    else:
+        summary = logs[:45] + "..." if len(logs) > 45 else logs
+        log_findings = f"Analyzed query telemetry: '{summary}'."
+        rc_findings = "Anomalous error rate pattern identified in monitoring stack."
+        rec_actions = [
+            "1. Inspect cloud provider service status dashboard",
+            "2. Check recent GitHub deployments / release tags",
+            "3. Analyze query plans for slow database queries"
+        ]
+        severity = "Warning"
+
     results = await asyncio.gather(
-        _agent("Log Analyzer", 1.0, "Detected 502 Bad Gateway errors. Upstream timeout in NGINX.", 0.95),
-        _agent("Root Cause Agent", 1.2, "auth-service unresponsive on port 8080. Likely OOM kill.", 0.88),
-        _agent("Severity Agent", 0.6, "Critical — All user authentications failing.", 1.0),
-        _agent("Fix Generator", 1.5, "3 remediation actions generated.", 0.92),
+        _agent("Log Analyzer", 1.0, log_findings, 0.95),
+        _agent("Root Cause Agent", 1.2, rc_findings, 0.88),
+        _agent("Severity Agent", 0.6, f"{severity} — Service disruption analyzed.", 1.0),
+        _agent("Fix Generator", 1.5, f"{len(rec_actions)} remediation actions generated.", 0.92),
     )
     terminal = [
         "═══════════════════════════════════════════════════════",
@@ -626,14 +666,15 @@ async def _run_analysis_pipeline(logs: str) -> ChatResponse:
         terminal.append(f"  [{r['agent']}]  ✓  {r['findings']}")
     terminal.extend([
         "", "  RECOMMENDED ACTIONS:",
-        "    1. kubectl rollout restart deployment auth-service",
-        "    2. Increase memory: requests=512Mi, limits=1Gi",
-        "    3. kubectl logs -f deploy/auth-service --tail=200",
+    ])
+    for action in rec_actions:
+        terminal.append(f"    {action}")
+    terminal.extend([
         "", "═══════════════════════════════════════════════════════", "",
     ])
     return ChatResponse(
         type="terminal_action",
-        text="Incident analysis complete. **Severity: Critical**. Root cause: auth-service OOM kill.",
+        text=f"Incident analysis complete. **Severity: {severity}**. Root cause: {rc_findings}",
         terminal_output=terminal, context="local",
     )
 

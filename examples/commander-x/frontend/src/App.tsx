@@ -107,10 +107,15 @@ const App: React.FC = () => {
     }).then(({ data }) => {
       sessionId.current = data.session_id;
       setSessionReady(true);
-    }).catch(() => {
-      // Fallback: use a cryptographically random client ID
-      sessionId.current = crypto.randomUUID();
-      setSessionReady(true);
+    }).catch((err) => {
+      console.error("Failed to initialize session with backend:", err);
+      setSessionReady(false);
+      setMessages(prev => [...prev, {
+        id: 'session-fail',
+        role: 'assistant',
+        content: '⚠️ Connection to backend failed. Ensure the server is running on port 8000.',
+        timestamp: new Date(),
+      }]);
     });
   }, []);
 

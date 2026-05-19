@@ -175,7 +175,7 @@ tables:
           input: milliseconds
           expr:
             kind: path
-            path: [created]
+            path: [createdAt]
 
   # ------------------------------------------------------------------
   # vercel.domains — list domains registered or active in your Vercel account
