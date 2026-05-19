@@ -1041,7 +1041,7 @@ fn build_query_pairs(
         let value = resolve_value_source(&param.value, render_context)?;
         if let Some(value) = value {
             let val_str = value_to_string(&value);
-            if !val_str.is_empty() {
+            if param.omit_empty != Some(true) || !val_str.is_empty() {
                 params.push((param.name.clone(), val_str));
             }
         }

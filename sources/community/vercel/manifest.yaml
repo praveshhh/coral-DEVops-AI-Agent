@@ -49,6 +49,7 @@ tables:
         - name: teamId
           from: input
           key: VERCEL_TEAM_ID
+          omit_empty: true
     response:
       rows_path: [projects]
     pagination:
@@ -133,6 +134,7 @@ tables:
         - name: teamId
           from: input
           key: VERCEL_TEAM_ID
+          omit_empty: true
         - name: projectId
           from: filter
           key: project_id
@@ -208,6 +210,7 @@ tables:
         - name: teamId
           from: input
           key: VERCEL_TEAM_ID
+          omit_empty: true
     response:
       rows_path: [domains]
     pagination:

@@ -654,6 +654,7 @@ mod tests {
                 query: vec![QueryParamSpec {
                     name: "q".to_string(),
                     value,
+                    omit_empty: None,
                 }],
                 ..RequestSpec::default()
             },
@@ -687,6 +688,7 @@ mod tests {
                     key: "missing".to_string(),
                     default: None,
                 },
+                omit_empty: None,
             }],
             ..base_request()
         };
@@ -720,6 +722,7 @@ mod tests {
                         key: "missing".to_string(),
                         default: None,
                     },
+                    omit_empty: None,
                 }],
                 ..base_request()
             },
@@ -753,6 +756,7 @@ mod tests {
                     separator: "-".to_string(),
                     part: 0,
                 },
+                omit_empty: None,
             }],
             ..base_request()
         };
@@ -785,6 +789,7 @@ mod tests {
                     separator: "-".to_string(),
                     part: 1,
                 },
+                omit_empty: None,
             }],
             ..base_request()
         };
@@ -829,6 +834,7 @@ mod tests {
                 query: vec![QueryParamSpec {
                     name: "value".to_string(),
                     value,
+                    omit_empty: None,
                 }],
                 ..base_request()
             };

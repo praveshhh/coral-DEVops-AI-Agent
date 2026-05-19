@@ -220,6 +220,8 @@ pub struct QueryParamSpec {
     pub name: String,
     #[serde(flatten)]
     pub value: ValueSourceSpec,
+    #[serde(default)]
+    pub omit_empty: Option<bool>,
 }
 
 /// One body field emitted into an HTTP request payload.
