@@ -3,6 +3,7 @@
     reason = "Integration test crates share this harness, but each target only uses a subset of the helpers."
 )]
 
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use arrow::array::Int64Array;
@@ -24,13 +25,15 @@ use coral_api::v1::{
     ListColumnsResponse, ListSourcesRequest, ListSourcesResponse, PaginationRequest,
     PaginationResponse, QueryPlan, SearchCatalogRequest, SearchCatalogResponse, Source, SourceInfo,
     SourceInputSpec, SourceOrigin, SourceSecretInput, Table, TableSummary, ValidateSourceRequest,
-    ValidateSourceResponse, Workspace, catalog_item, source_input_spec::Input as ProtoSourceInput,
+    ValidateSourceResponse, Workspace, catalog_item, import_source_response,
+    source_input_spec::Input as ProtoSourceInput,
 };
 use coral_api::{CORAL_ERROR_DOMAIN, CORAL_ERROR_REASON_SOURCE_NOT_FOUND};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::Stream;
+use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
 use tonic::transport::Server;
 use tonic::{Code, Request, Response, Status};
 use tonic_types::{ErrorDetail, StatusExt as _};
@@ -785,6 +788,9 @@ struct MockSourceService {
 
 #[tonic::async_trait]
 impl SourceService for MockSourceService {
+    type ImportSourceStream =
+        Pin<Box<dyn Stream<Item = Result<ImportSourceResponse, Status>> + Send>>;
+
     async fn discover_sources(
         &self,
         request: Request<DiscoverSourcesRequest>,
@@ -859,15 +865,19 @@ impl SourceService for MockSourceService {
     async fn import_source(
         &self,
         request: Request<ImportSourceRequest>,
-    ) -> Result<Response<ImportSourceResponse>, Status> {
+    ) -> Result<Response<Self::ImportSourceStream>, Status> {
         self.captured
             .import_source
             .lock()
             .expect("import_source capture")
             .push(request.into_inner());
-        Ok(Response::new(ImportSourceResponse {
-            source: Some(mock_source()),
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<ImportSourceResponse, Status>>(1);
+        tx.send(Ok(ImportSourceResponse {
+            event: Some(import_source_response::Event::Source(mock_source())),
         }))
+        .await
+        .expect("send import source response");
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     async fn delete_source(

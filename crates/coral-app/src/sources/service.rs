@@ -1,18 +1,24 @@
 //! Implements the gRPC `SourceService` for source lifecycle APIs.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
 use coral_api::v1::source_service_server::SourceService as SourceServiceApi;
 use coral_api::v1::{
-    CreateBundledSourceRequest, CreateBundledSourceResponse, DeleteSourceRequest,
-    DeleteSourceResponse, DiscoverSourcesRequest, DiscoverSourcesResponse, GetSourceInfoRequest,
-    GetSourceInfoResponse, GetSourceRequest, GetSourceResponse, ImportSourceRequest,
-    ImportSourceResponse, ListSourcesRequest, ListSourcesResponse,
-    OAuthAuthorizationCodeCredentialMethod, OAuthCredentialClient, OAuthCredentialClientId,
-    OAuthCredentialClientSecret, OAuthCredentialEndpoints, OAuthCredentialScope,
+    CreateBundledSourceRequest, CreateBundledSourceResponse, CredentialMetadata,
+    DeleteSourceRequest, DeleteSourceResponse, DiscoverSourcesRequest, DiscoverSourcesResponse,
+    GetSourceInfoRequest, GetSourceInfoResponse, GetSourceRequest, GetSourceResponse,
+    ImportSourceRequest, ImportSourceResponse, ListSourcesRequest, ListSourcesResponse,
+    OAuthAuthorizationCodeCredentialMethod, OAuthCredentialAuthorization, OAuthCredentialClient,
+    OAuthCredentialClientId, OAuthCredentialClientSecret, OAuthCredentialCompleted,
+    OAuthCredentialEndpoints, OAuthCredentialInput, OAuthCredentialRetrieval, OAuthCredentialScope,
     OAuthCredentialScopes, OauthCredentialClientSecretTransport, OauthCredentialPkceMode,
     OauthCredentialScopeDelimiter, Source, SourceConfigCredentialMethod, SourceCredential,
     SourceCredentialMethod, SourceInfo, SourceInputSpec, SourceOrigin as ProtoSourceOrigin,
     SourceSecret, SourceSecretInput, SourceVariable, SourceVariableInput, ValidateSourceRequest,
-    ValidateSourceResponse, source_credential_method::Method as ProtoCredentialMethod,
+    ValidateSourceResponse, import_source_response,
+    source_credential_method::Method as ProtoCredentialMethod,
     source_input_spec::Input as ProtoSourceInput,
 };
 use coral_spec::{
@@ -22,11 +28,14 @@ use coral_spec::{
 };
 use tonic::{Request, Response, Status};
 
-use crate::bootstrap::app_status;
+use crate::bootstrap::{AppError, app_status};
 use crate::query::manager::QueryManager;
 use crate::sources::SourceName;
 use crate::sources::manager::{
-    CreateBundledSourceCommand, ImportSourceCommand, SourceBinding, SourceBindings, SourceManager,
+    CreateBundledSourceCommand, ImportSourceCommand, ImportSourceEventSender,
+    ImportSourceWithCredentialsCommand, ImportSourceWithCredentialsEvent,
+    PendingImportSourceWithCredentialsEvent, SourceBinding, SourceBindings, SourceManager,
+    SourceOAuthCredentialRetrieval,
 };
 use crate::sources::model::{CandidateSource, InstalledSource, SourceOrigin};
 use crate::transport::{
@@ -34,6 +43,8 @@ use crate::transport::{
     workspace_name_from_proto, workspace_to_proto,
 };
 use crate::workspaces::WorkspaceName;
+use tokio::sync::mpsc;
+use tokio_stream::Stream;
 
 #[derive(Clone)]
 pub(crate) struct SourceService {
@@ -52,6 +63,9 @@ impl SourceService {
 
 #[tonic::async_trait]
 impl SourceServiceApi for SourceService {
+    type ImportSourceStream =
+        Pin<Box<dyn Stream<Item = Result<ImportSourceResponse, Status>> + Send>>;
+
     async fn discover_sources(
         &self,
         request: Request<DiscoverSourcesRequest>,
@@ -159,22 +173,56 @@ impl SourceServiceApi for SourceService {
     async fn import_source(
         &self,
         request: Request<ImportSourceRequest>,
-    ) -> Result<Response<ImportSourceResponse>, Status> {
+    ) -> Result<Response<Self::ImportSourceStream>, Status> {
         let span = grpc_span(&request);
         let sources = self.sources.clone();
-        instrument_grpc(span, async move {
+        instrument_grpc(span.clone(), async move {
             let request = request.into_inner();
             let workspace_name = workspace_name_from_proto(request.workspace.as_ref())?;
-            let command = ImportSourceCommand {
+            let response_workspace_name = workspace_name.clone();
+            if request.oauth_credential_retrievals.is_empty() {
+                let command = ImportSourceCommand {
+                    manifest_yaml: request.manifest_yaml,
+                    bindings: source_bindings_from_proto(request.variables, request.secrets),
+                };
+                let installed = sources
+                    .import_source(&workspace_name, &command)
+                    .map_err(app_status)?;
+                let response = ImportSourceResponse {
+                    event: Some(import_source_response::Event::Source(
+                        installed_source_to_proto(&response_workspace_name, installed),
+                    )),
+                };
+                return Ok(Response::new(
+                    Box::pin(tokio_stream::once(Ok(response))) as Self::ImportSourceStream
+                ));
+            }
+            let command = ImportSourceWithCredentialsCommand {
                 manifest_yaml: request.manifest_yaml,
                 bindings: source_bindings_from_proto(request.variables, request.secrets),
+                oauth_credential_retrievals: request
+                    .oauth_credential_retrievals
+                    .into_iter()
+                    .map(oauth_credential_retrieval_from_proto)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(app_status)?,
             };
-            let installed = sources
-                .import_source(&workspace_name, &command)
-                .map_err(app_status)?;
-            Ok(Response::new(ImportSourceResponse {
-                source: Some(installed_source_to_proto(&workspace_name, installed)),
-            }))
+            let (event_tx, event_rx) = mpsc::channel(8);
+            let import = Box::pin(instrument_grpc(span, async move {
+                sources
+                    .import_source_with_credentials(
+                        &workspace_name,
+                        command,
+                        ImportSourceEventSender::new(event_tx),
+                    )
+                    .await
+                    .map_err(app_status)
+            }));
+            Ok(Response::new(Box::pin(ImportSourceResponseStream::new(
+                event_rx,
+                import,
+                response_workspace_name,
+            )) as Self::ImportSourceStream))
         })
         .await
     }
@@ -223,6 +271,71 @@ impl SourceServiceApi for SourceService {
     }
 }
 
+type ImportSourceFuture = Pin<Box<dyn Future<Output = Result<InstalledSource, Status>> + Send>>;
+
+struct ImportSourceResponseStream {
+    events: mpsc::Receiver<PendingImportSourceWithCredentialsEvent>,
+    import: Option<ImportSourceFuture>,
+    response_workspace_name: WorkspaceName,
+    completion: Option<Result<ImportSourceResponse, Status>>,
+}
+
+impl ImportSourceResponseStream {
+    fn new(
+        events: mpsc::Receiver<PendingImportSourceWithCredentialsEvent>,
+        import: ImportSourceFuture,
+        response_workspace_name: WorkspaceName,
+    ) -> Self {
+        Self {
+            events,
+            import: Some(import),
+            response_workspace_name,
+            completion: None,
+        }
+    }
+
+    fn poll_event(&mut self, cx: &mut Context<'_>) -> Poll<Option<ImportSourceResponse>> {
+        Pin::new(&mut self.events)
+            .poll_recv(cx)
+            .map(|event| event.map(|event| import_source_event_to_proto(event.into_event())))
+    }
+}
+
+impl Stream for ImportSourceResponseStream {
+    type Item = Result<ImportSourceResponse, Status>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            if let Poll::Ready(Some(event)) = this.poll_event(cx) {
+                return Poll::Ready(Some(Ok(event)));
+            }
+            if let Some(completion) = this.completion.take() {
+                return Poll::Ready(Some(completion));
+            }
+            let Some(import) = this.import.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match import.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    this.import = None;
+                    this.completion = Some(result.map(|installed| ImportSourceResponse {
+                        event: Some(import_source_response::Event::Source(
+                            installed_source_to_proto(&this.response_workspace_name, installed),
+                        )),
+                    }));
+                }
+                Poll::Pending => {
+                    return match this.poll_event(cx) {
+                        Poll::Ready(Some(event)) => Poll::Ready(Some(Ok(event))),
+                        Poll::Ready(None) | Poll::Pending => Poll::Pending,
+                    };
+                }
+            }
+        }
+    }
+}
+
 fn source_bindings_from_proto(
     variables: Vec<SourceVariable>,
     secrets: Vec<SourceSecret>,
@@ -243,11 +356,63 @@ fn source_variable_from_proto(variable: SourceVariable) -> SourceBinding {
     }
 }
 
+fn oauth_credential_input_from_proto(input: OAuthCredentialInput) -> SourceBinding {
+    SourceBinding {
+        key: input.key,
+        value: input.value,
+    }
+}
+
+fn oauth_credential_retrieval_from_proto(
+    retrieval: OAuthCredentialRetrieval,
+) -> Result<SourceOAuthCredentialRetrieval, AppError> {
+    let input_key = retrieval.input_key;
+    let method_index = retrieval.method_index.ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "missing OAuth credential retrieval method_index for source input '{input_key}'"
+        ))
+    })?;
+    Ok(SourceOAuthCredentialRetrieval {
+        input_key,
+        method_index: usize::try_from(method_index).unwrap_or(usize::MAX),
+        credential_inputs: retrieval
+            .credential_inputs
+            .into_iter()
+            .map(oauth_credential_input_from_proto)
+            .collect(),
+    })
+}
+
 fn source_secret_from_proto(secret: SourceSecret) -> SourceBinding {
     SourceBinding {
         key: secret.key,
         value: secret.value,
     }
+}
+
+fn import_source_event_to_proto(event: ImportSourceWithCredentialsEvent) -> ImportSourceResponse {
+    let event = match event {
+        ImportSourceWithCredentialsEvent::OAuthAuthorization {
+            input_key,
+            authorization_url,
+            expires_in_seconds,
+        } => import_source_response::Event::OauthAuthorization(OAuthCredentialAuthorization {
+            input_key,
+            authorization_url,
+            expires_in_seconds,
+        }),
+        ImportSourceWithCredentialsEvent::OAuthCompleted {
+            input_key,
+            metadata,
+        } => import_source_response::Event::OauthCompleted(OAuthCredentialCompleted {
+            input_key,
+            metadata: metadata
+                .into_iter()
+                .map(|(key, value)| CredentialMetadata { key, value })
+                .collect(),
+        }),
+    };
+    ImportSourceResponse { event: Some(event) }
 }
 
 fn installed_source_to_proto(workspace_name: &WorkspaceName, source: InstalledSource) -> Source {
@@ -497,5 +662,54 @@ mod tests {
         };
 
         assert!(secret.credential.is_none());
+    }
+
+    #[test]
+    fn converts_oauth_credential_retrieval_from_proto() {
+        let request = oauth_credential_retrieval_from_proto(OAuthCredentialRetrieval {
+            input_key: "API_TOKEN".to_string(),
+            method_index: Some(1),
+            credential_inputs: vec![
+                OAuthCredentialInput {
+                    key: "CLIENT_ID".to_string(),
+                    value: "client-id".to_string(),
+                },
+                OAuthCredentialInput {
+                    key: "CLIENT_SECRET".to_string(),
+                    value: "client-secret".to_string(),
+                },
+            ],
+        })
+        .expect("convert OAuth credential retrieval");
+
+        assert_eq!(request.input_key, "API_TOKEN");
+        assert_eq!(request.method_index, 1);
+        assert_eq!(request.credential_inputs.len(), 2);
+        assert_eq!(request.credential_inputs[0].key, "CLIENT_ID");
+        assert_eq!(request.credential_inputs[0].value, "client-id");
+        assert_eq!(request.credential_inputs[1].key, "CLIENT_SECRET");
+        assert_eq!(request.credential_inputs[1].value, "client-secret");
+    }
+
+    #[test]
+    fn rejects_oauth_credential_retrieval_without_method_index() {
+        let result = oauth_credential_retrieval_from_proto(OAuthCredentialRetrieval {
+            input_key: "API_TOKEN".to_string(),
+            method_index: None,
+            credential_inputs: Vec::new(),
+        });
+        let Err(error) = result else {
+            panic!("missing method_index should be rejected");
+        };
+
+        let AppError::InvalidInput(message) = error else {
+            panic!("unexpected error: {error}");
+        };
+        assert!(
+            message.contains(
+                "missing OAuth credential retrieval method_index for source input 'API_TOKEN'"
+            ),
+            "unexpected error message: {message}"
+        );
     }
 }

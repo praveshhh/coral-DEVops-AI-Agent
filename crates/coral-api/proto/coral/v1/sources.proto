@@ -254,12 +254,66 @@ message ImportSourceRequest {
   repeated SourceVariable variables = 3;
   // Source-owned secret values.
   repeated SourceSecret secrets = 4;
+  // OAuth credential retrievals the app should run before validation and import.
+  repeated OAuthCredentialRetrieval oauth_credential_retrievals = 5;
 }
 
-// Returns the imported source.
+// Streaming event emitted while importing a source.
 message ImportSourceResponse {
-  // The imported source resource.
-  Source source = 1;
+  // Import progress or completion event.
+  oneof event {
+    // Source import completed.
+    Source source = 1;
+    // OAuth authorization URL is ready.
+    OAuthCredentialAuthorization oauth_authorization = 2;
+    // OAuth credential retrieval completed.
+    OAuthCredentialCompleted oauth_completed = 3;
+  }
+}
+
+// Safe metadata returned after OAuth retrieval completes.
+message CredentialMetadata {
+  // Metadata key.
+  string key = 1;
+  // Metadata value.
+  string value = 2;
+}
+
+// Transient OAuth method input.
+message OAuthCredentialInput {
+  // Logical input key expected by the selected OAuth credential method.
+  string key = 1;
+  // Input value. This may contain sensitive material such as an OAuth client
+  // secret and must not be treated like source-visible configuration.
+  string value = 2;
+}
+
+// OAuth credential retrieval selected for one source secret input.
+message OAuthCredentialRetrieval {
+  // Secret input key being retrieved.
+  string input_key = 1;
+  // Zero-based selected credential method index.
+  optional uint32 method_index = 2;
+  // Method-specific retrieval input values, such as client ID or client secret.
+  repeated OAuthCredentialInput credential_inputs = 3;
+}
+
+// Authorization URL emitted while importing a source with OAuth credentials.
+message OAuthCredentialAuthorization {
+  // Secret input key being retrieved.
+  string input_key = 1;
+  // Provider authorization URL the user must visit.
+  string authorization_url = 2;
+  // Seconds until the OAuth retrieval expires.
+  uint64 expires_in_seconds = 3;
+}
+
+// Safe completion metadata emitted after OAuth credential retrieval.
+message OAuthCredentialCompleted {
+  // Secret input key populated by the completed OAuth retrieval.
+  string input_key = 1;
+  // Safe provider metadata, never token material.
+  repeated CredentialMetadata metadata = 2;
 }
 
 // Lists all registered sources in one workspace.
@@ -370,8 +424,9 @@ service SourceService {
   rpc GetSourceInfo(GetSourceInfoRequest) returns (GetSourceInfoResponse);
   // Installs one bundled source.
   rpc CreateBundledSource(CreateBundledSourceRequest) returns (CreateBundledSourceResponse);
-  // Imports one user-provided source manifest.
-  rpc ImportSource(ImportSourceRequest) returns (ImportSourceResponse);
+  // Imports one user-provided source manifest, streaming credential retrieval
+  // progress before the final source event when credentials are app-owned.
+  rpc ImportSource(ImportSourceRequest) returns (stream ImportSourceResponse);
   // Deletes a registered source.
   rpc DeleteSource(DeleteSourceRequest) returns (DeleteSourceResponse);
   // Validates that a registered source is queryable.
