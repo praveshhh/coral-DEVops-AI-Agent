@@ -1,0 +1,633 @@
+name: sportmonks_cricket
+version: 0.1.0
+dsl_version: 3
+backend: http
+description: >-
+  Query cricket players, career statistics, and match fixtures from
+  the SportMonks Cricket API. Normalize deeply nested JSON into
+  flat SQL tables ready for AI-agent analytics queries.
+inputs:
+  SPORTMONKS_API_TOKEN:
+    kind: secret
+    hint: |
+      SportMonks API token. Sign in at https://sportmonks.com, open
+      your dashboard, and copy the API token from the My Account >
+      API Token section. Pass as SPORTMONKS_API_TOKEN when adding this
+      source. The token is sent as an api_token query parameter.
+base_url: https://cricket.sportmonks.com/api/v2.0
+auth:
+  type: HeaderAuth
+  headers: []
+request_headers:
+  - name: Accept
+    from: literal
+    value: application/json
+test_queries:
+  - SELECT id, fullname, battingstyle, bowlingstyle FROM sportmonks_cricket.players LIMIT 5
+  - >-
+    SELECT player_id, type, batting_matches, batting_average, bowling_economy_rate
+    FROM sportmonks_cricket.player_career_stats
+    WHERE player_id = '30'
+  - SELECT id, localteam_name, visitorteam_name, status, starting_at FROM sportmonks_cricket.fixtures LIMIT 5
+tables:
+  # ──────────────────────────────────────────────────────────────────────
+  # players
+  # ──────────────────────────────────────────────────────────────────────
+  - name: players
+    description: >-
+      Cricket player profiles from the SportMonks Cricket API including
+      name, nationality, batting style, bowling style, and image URL.
+    guide: >
+      Start here to discover player IDs. Use `WHERE player_id = <id>` to
+      fetch a single player. Combine with `player_career_stats` on `id`
+      to build analytics queries such as ranking batsmen by strike rate.
+      Response is paged at 25 records per page by default.
+    fetch_limit_default: 50
+    filters:
+      - name: player_id
+    request:
+      method: GET
+      path: /players/{{filter.player_id}}
+      query:
+        - name: api_token
+          from: input
+          key: SPORTMONKS_API_TOKEN
+    response:
+      rows_path:
+        - data
+      row_strategy: direct
+    pagination:
+      mode: none
+    columns:
+      - name: id
+        type: Int64
+        nullable: false
+        description: Unique SportMonks player ID.
+        expr:
+          kind: path
+          path:
+            - id
+      - name: country_id
+        type: Int64
+        nullable: true
+        description: Country ID.
+        expr:
+          kind: path
+          path:
+            - country_id
+      - name: firstname
+        type: Utf8
+        nullable: true
+        description: Player first name.
+        expr:
+          kind: path
+          path:
+            - firstname
+      - name: lastname
+        type: Utf8
+        nullable: true
+        description: Player last name.
+        expr:
+          kind: path
+          path:
+            - lastname
+      - name: fullname
+        type: Utf8
+        nullable: true
+        description: Player full name as provided by SportMonks.
+        expr:
+          kind: path
+          path:
+            - fullname
+      - name: image_path
+        type: Utf8
+        nullable: true
+        description: URL of the player's profile image on the SportMonks CDN.
+        expr:
+          kind: path
+          path:
+            - image_path
+      - name: dateofbirth
+        type: Utf8
+        nullable: true
+        description: Player date of birth in YYYY-MM-DD format.
+        expr:
+          kind: path
+          path:
+            - dateofbirth
+      - name: gender
+        type: Utf8
+        nullable: true
+        description: Player gender (m for male, f for female).
+        expr:
+          kind: path
+          path:
+            - gender
+      - name: battingstyle
+        type: Utf8
+        nullable: true
+        description: Batting style such as right-hand bat or left-hand bat.
+        expr:
+          kind: path
+          path:
+            - battingstyle
+      - name: bowlingstyle
+        type: Utf8
+        nullable: true
+        description: Bowling style such as right-arm fast or left-arm orthodox.
+        expr:
+          kind: path
+          path:
+            - bowlingstyle
+      - name: player_id_filter
+        type: Int64
+        nullable: true
+        virtual: true
+        description: Echoes the player_id filter used for single-player lookups.
+        expr:
+          kind: from_filter
+          key: player_id
+
+  # ──────────────────────────────────────────────────────────────────────
+  # player_career_stats
+  # ──────────────────────────────────────────────────────────────────────
+  - name: player_career_stats
+    description: >-
+      Batting and bowling career statistics for a SportMonks cricket player,
+      broken down by format type (Test, ODI, T20, etc.) and team. Each row
+      is one career stint for a player in a specific format and team context.
+    guide: >
+      Requires `player_id`. Fetch with `WHERE player_id = <id>`. Each row
+      represents one format-team career record (e.g. T20 for team 37).
+      Use `WHERE type = 'T20I'` to filter by format. Join to `players` on
+      `player_id = players.id` for name enrichment.
+      Killer query: rank all T20 batsmen by batting_strike_rate where
+      batting_matches > 20.
+    fetch_limit_default: 50
+    filters:
+      - name: player_id
+        required: true
+    request:
+      method: GET
+      path: /players/{{filter.player_id}}
+      query:
+        - name: include
+          from: literal
+          value: career
+        - name: api_token
+          from: input
+          key: SPORTMONKS_API_TOKEN
+    response:
+      rows_path:
+        - data
+        - career
+        - data
+      row_strategy: direct
+    pagination:
+      mode: none
+    columns:
+      - name: player_id
+        type: Int64
+        nullable: false
+        description: SportMonks player ID; join to `players.id`.
+        expr:
+          kind: path
+          path:
+            - player_id
+      - name: season_id
+        type: Int64
+        nullable: true
+        description: Season ID for this career record, when available.
+        expr:
+          kind: path
+          path:
+            - season_id
+      - name: team_id
+        type: Int64
+        nullable: true
+        description: Team ID for this career record.
+        expr:
+          kind: path
+          path:
+            - team_id
+      - name: type
+        type: Utf8
+        nullable: true
+        description: >-
+          Match format for this career record such as Test, ODI, T20I, or
+          First-class.
+        expr:
+          kind: path
+          path:
+            - type
+      - name: batting_matches
+        type: Int64
+        nullable: true
+        description: Number of matches played in this batting career record.
+        expr:
+          kind: path
+          path:
+            - batting
+            - matches
+      - name: batting_innings
+        type: Int64
+        nullable: true
+        description: Number of innings batted.
+        expr:
+          kind: path
+          path:
+            - batting
+            - innings
+      - name: batting_runs_scored
+        type: Int64
+        nullable: true
+        description: Total runs scored across all innings in this career record.
+        expr:
+          kind: path
+          path:
+            - batting
+            - runs_scored
+      - name: batting_average
+        type: Float64
+        nullable: true
+        description: Batting average (runs per dismissal) for this career record.
+        expr:
+          kind: path
+          path:
+            - batting
+            - average
+      - name: batting_strike_rate
+        type: Float64
+        nullable: true
+        description: Batting strike rate (runs per 100 balls) for this career record.
+        expr:
+          kind: path
+          path:
+            - batting
+            - strike_rate
+      - name: batting_highest_inning_score
+        type: Utf8
+        nullable: true
+        description: Highest individual innings score, including not-out indicator.
+        expr:
+          kind: path
+          path:
+            - batting
+            - highest_inning_score
+      - name: batting_hundreds
+        type: Int64
+        nullable: true
+        description: Number of century (100+) innings.
+        expr:
+          kind: path
+          path:
+            - batting
+            - hundreds
+      - name: batting_fifties
+        type: Int64
+        nullable: true
+        description: Number of half-century (50-99) innings.
+        expr:
+          kind: path
+          path:
+            - batting
+            - fifties
+      - name: batting_fours
+        type: Int64
+        nullable: true
+        description: Total number of fours hit.
+        expr:
+          kind: path
+          path:
+            - batting
+            - fours
+      - name: batting_sixes
+        type: Int64
+        nullable: true
+        description: Total number of sixes hit.
+        expr:
+          kind: path
+          path:
+            - batting
+            - sixes
+      - name: bowling_matches
+        type: Int64
+        nullable: true
+        description: Number of matches played in this bowling career record.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - matches
+      - name: bowling_innings
+        type: Int64
+        nullable: true
+        description: Number of innings bowled.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - innings
+      - name: bowling_wickets
+        type: Int64
+        nullable: true
+        description: Total wickets taken in this career record.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - wickets
+      - name: bowling_economy_rate
+        type: Float64
+        nullable: true
+        description: Bowling economy rate (runs conceded per over) for this record.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - econ_rate
+      - name: bowling_average
+        type: Float64
+        nullable: true
+        description: Bowling average (runs per wicket) for this career record.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - average
+      - name: bowling_strike_rate
+        type: Float64
+        nullable: true
+        description: Bowling strike rate (balls per wicket) for this career record.
+        expr:
+          kind: path
+          path:
+            - bowling
+            - strike_rate
+      - name: bowling_best_bowling
+        type: Utf8
+        nullable: true
+        description: Best bowling figures in a single innings (e.g. 5/23).
+        expr:
+          kind: path
+          path:
+            - bowling
+            - best_bowling
+      - name: player_id_filter
+        type: Int64
+        nullable: false
+        virtual: true
+        description: Echoes the required player_id filter used for this scan.
+        expr:
+          kind: from_filter
+          key: player_id
+
+  # ──────────────────────────────────────────────────────────────────────
+  # fixtures
+  # ──────────────────────────────────────────────────────────────────────
+  - name: fixtures
+    description: >-
+      Cricket match fixtures from the SportMonks Cricket API including
+      league, season, local team, visitor team, venue, match type,
+      status, and result details.
+    guide: >
+      Use `WHERE season_id = <id>` or `WHERE league_id = <id>` to scope
+      fixtures to a specific competition. Use `WHERE status = 'Finished'`
+      for completed matches or `WHERE status = 'NS'` for upcoming ones.
+      The `localteam_name` and `visitorteam_name` columns are resolved
+      inline via the `localteam;visitorteam` include. Join to
+      `player_career_stats` via `team_id` for rich analytics queries.
+    fetch_limit_default: 25
+    filters:
+      - name: league_id
+      - name: season_id
+    request:
+      method: GET
+      path: /fixtures
+      query:
+        - name: include
+          from: literal
+          value: localteam,visitorteam,venue
+        - name: api_token
+          from: input
+          key: SPORTMONKS_API_TOKEN
+        - name: filter[league_id]
+          from: filter
+          key: league_id
+        - name: filter[season_id]
+          from: filter
+          key: season_id
+    response:
+      rows_path:
+        - data
+      row_strategy: direct
+    pagination:
+      mode: page
+      page_param: page
+      page_start: 1
+      page_step: 1
+      page_size:
+        default: 25
+        max: 25
+        query_param: per_page
+    columns:
+      - name: id
+        type: Int64
+        nullable: false
+        description: Unique SportMonks fixture (match) ID.
+        expr:
+          kind: path
+          path:
+            - id
+      - name: league_id
+        type: Int64
+        nullable: true
+        description: League ID for this fixture; filter pushes down to the API.
+        expr:
+          kind: path
+          path:
+            - league_id
+      - name: season_id
+        type: Int64
+        nullable: true
+        description: Season ID for this fixture; filter pushes down to the API.
+        expr:
+          kind: path
+          path:
+            - season_id
+      - name: stage_id
+        type: Int64
+        nullable: true
+        description: Stage or round ID within the season.
+        expr:
+          kind: path
+          path:
+            - stage_id
+      - name: round
+        type: Utf8
+        nullable: true
+        description: Round label for the fixture within the stage.
+        expr:
+          kind: path
+          path:
+            - round
+      - name: localteam_id
+        type: Int64
+        nullable: true
+        description: Home team ID; join to `player_career_stats.team_id`.
+        expr:
+          kind: path
+          path:
+            - localteam_id
+      - name: localteam_name
+        type: Utf8
+        nullable: true
+        description: Home team name resolved from the localteam include.
+        expr:
+          kind: path
+          path:
+            - localteam
+            - data
+            - name
+      - name: localteam_code
+        type: Utf8
+        nullable: true
+        description: Short code for the home team (e.g. IND, AUS).
+        expr:
+          kind: path
+          path:
+            - localteam
+            - data
+            - code
+      - name: visitorteam_id
+        type: Int64
+        nullable: true
+        description: Away team ID; join to `player_career_stats.team_id`.
+        expr:
+          kind: path
+          path:
+            - visitorteam_id
+      - name: visitorteam_name
+        type: Utf8
+        nullable: true
+        description: Away team name resolved from the visitorteam include.
+        expr:
+          kind: path
+          path:
+            - visitorteam
+            - data
+            - name
+      - name: visitorteam_code
+        type: Utf8
+        nullable: true
+        description: Short code for the away team (e.g. ENG, PAK).
+        expr:
+          kind: path
+          path:
+            - visitorteam
+            - data
+            - code
+      - name: venue_id
+        type: Int64
+        nullable: true
+        description: Venue ID where the match is or was played.
+        expr:
+          kind: path
+          path:
+            - venue_id
+      - name: venue_name
+        type: Utf8
+        nullable: true
+        description: Name of the venue resolved from the venue include.
+        expr:
+          kind: path
+          path:
+            - venue
+            - data
+            - name
+      - name: venue_city
+        type: Utf8
+        nullable: true
+        description: City of the venue resolved from the venue include.
+        expr:
+          kind: path
+          path:
+            - venue
+            - data
+            - city
+      - name: venue_country
+        type: Utf8
+        nullable: true
+        description: Country of the venue resolved from the venue include.
+        expr:
+          kind: path
+          path:
+            - venue
+            - data
+            - country
+      - name: type
+        type: Utf8
+        nullable: true
+        description: Match type such as Test, ODI, T20, or First-class.
+        expr:
+          kind: path
+          path:
+            - type
+      - name: status
+        type: Utf8
+        nullable: true
+        description: >-
+          Match status: NS (not started), Inprogress, Finished, Aban (abandoned),
+          or Cancld.
+        expr:
+          kind: path
+          path:
+            - status
+      - name: starting_at
+        type: Utf8
+        nullable: true
+        description: Scheduled or actual match start datetime in UTC (YYYY-MM-DD HH:mm:ss).
+        expr:
+          kind: path
+          path:
+            - starting_at
+      - name: winner_team_id
+        type: Int64
+        nullable: true
+        description: Team ID of the match winner; null when match is not yet finished.
+        expr:
+          kind: path
+          path:
+            - winner_team_id
+      - name: man_of_match_id
+        type: Int64
+        nullable: true
+        description: Player ID of the man-of-the-match award; null when not yet awarded.
+        expr:
+          kind: path
+          path:
+            - man_of_match_id
+      - name: total_overs_played
+        type: Int64
+        nullable: true
+        description: Total overs bowled in the match across both innings.
+        expr:
+          kind: path
+          path:
+            - total_overs_played
+      - name: league_id_filter
+        type: Int64
+        nullable: true
+        virtual: true
+        description: Echoes the league_id filter used for this scan.
+        expr:
+          kind: from_filter
+          key: league_id
+      - name: season_id_filter
+        type: Int64
+        nullable: true
+        virtual: true
+        description: Echoes the season_id filter used for this scan.
+        expr:
+          kind: from_filter
+          key: season_id
