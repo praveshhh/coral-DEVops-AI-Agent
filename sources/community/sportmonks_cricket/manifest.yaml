@@ -25,7 +25,7 @@ request_headers:
     from: literal
     value: application/json
 test_queries:
-  - SELECT id, fullname, battingstyle, bowlingstyle FROM sportmonks_cricket.players WHERE player_id = 30
+  - SELECT id, fullname, battingstyle, bowlingstyle FROM sportmonks_cricket.players LIMIT 5
   - >-
     SELECT player_id, type, batting_matches, batting_average, bowling_economy_rate
     FROM sportmonks_cricket.player_career_stats
@@ -40,19 +40,30 @@ tables:
       Cricket player profiles from the SportMonks Cricket API including
       name, nationality, batting style, bowling style, and image URL.
     guide: >
-      Single-player profile lookup table. Requires `player_id`. Fetch with `WHERE player_id = <id>`.
-      Combine with `player_career_stats` on `id` to build analytics queries for a specific player.
+      Start here to discover player IDs. Use `WHERE player_id = <id>` to
+      fetch a single player. Combine with `player_career_stats` on `id`
+      to build analytics queries such as ranking batsmen by strike rate.
+      Omitting the filter will browse all players.
     fetch_limit_default: 50
     filters:
       - name: player_id
-        required: true
+        required: false
     request:
       method: GET
-      path: /players/{{filter.player_id}}
+      path: /players
       query:
         - name: api_token
           from: input
           key: SPORTMONKS_API_TOKEN
+    requests:
+      - when_filters:
+          - player_id
+        method: GET
+        path: /players/{{filter.player_id}}
+        query:
+          - name: api_token
+            from: input
+            key: SPORTMONKS_API_TOKEN
     response:
       rows_path:
         - data
@@ -142,9 +153,9 @@ tables:
             - bowlingstyle
       - name: player_id
         type: Int64
-        nullable: false
+        nullable: true
         virtual: true
-        description: Echoes the required player_id filter used for single-player lookups.
+        description: Echoes the optional player_id filter used for single-player lookups.
         expr:
           kind: from_filter
           key: player_id
@@ -395,7 +406,7 @@ tables:
       fixtures to a specific competition. Use `WHERE status = 'Finished'`
       for completed matches or `WHERE status = 'NS'` for upcoming ones.
       The `localteam_name` and `visitorteam_name` columns are resolved
-      inline via the `localteam;visitorteam` include. Join to
+      inline via the `localteam,visitorteam` include. Join to
       `player_career_stats` via `team_id` for rich analytics queries.
     fetch_limit_default: 25
     filters:
@@ -555,16 +566,16 @@ tables:
             - venue
             - data
             - city
-      - name: venue_country
-        type: Utf8
+      - name: venue_country_id
+        type: Int64
         nullable: true
-        description: Country of the venue resolved from the venue include.
+        description: Country ID of the venue resolved from the venue include.
         expr:
           kind: path
           path:
             - venue
             - data
-            - country
+            - country_id
       - name: type
         type: Utf8
         nullable: true
