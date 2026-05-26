@@ -9,7 +9,7 @@ includes — into flat, typed columns ready for AI-agent analytics.
 
 | Table | Description | Required filters | Optional filters |
 |-------|-------------|-----------------|-----------------|
-| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | — | `player_id` |
+| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | `player_id` | — |
 | `sportmonks_cricket.player_career_stats` | Batting and bowling career stats per format and team | `player_id` | — |
 | `sportmonks_cricket.fixtures` | Match fixtures with teams, venue, status, and result | — | `league_id`, `season_id` |
 
@@ -24,6 +24,9 @@ Requires `SPORTMONKS_API_TOKEN`.
 3. Copy the token
 
 The connector appends the token as an `api_token` query parameter to every API request.
+
+> [!IMPORTANT]
+> **SportMonks Cricket Plan Access:** If you are on the free/trial plan, your API access is limited to league IDs `3`, `10`, and `5`. Querying data outside these leagues will result in a `403 Forbidden` response.
 
 ## Install
 
@@ -40,12 +43,12 @@ SPORTMONKS_API_TOKEN=your-token coral source add --file sources/community/sportm
 
 ## Example queries
 
-Discover players:
+Fetch a specific player profile:
 
 ```sql
 SELECT id, fullname, country_id, battingstyle, bowlingstyle
 FROM sportmonks_cricket.players
-LIMIT 20;
+WHERE player_id = 30;
 ```
 
 Career stats for a specific player:
@@ -63,22 +66,21 @@ FROM sportmonks_cricket.player_career_stats
 WHERE player_id = 30;
 ```
 
-Rank T20 batsmen by strike rate:
+Fetch career stats joined with player profile:
 
 ```sql
 SELECT
-  p.fullname          AS player_name,
-  p.country_id,
+  p.fullname,
+  p.battingstyle,
+  s.type,
+  s.batting_matches,
+  s.batting_runs_scored,
   s.batting_average,
-  s.batting_strike_rate,
-  s.bowling_economy_rate
+  s.batting_strike_rate
 FROM sportmonks_cricket.player_career_stats s
 JOIN sportmonks_cricket.players p
   ON s.player_id = p.id
-WHERE s.type = 'T20I'
-  AND s.batting_matches > 20
-ORDER BY s.batting_strike_rate DESC
-LIMIT 10;
+WHERE s.player_id = 30 AND p.player_id = 30;
 ```
 
 Browse recent fixtures:
@@ -94,7 +96,7 @@ SELECT
   venue_name,
   venue_city
 FROM sportmonks_cricket.fixtures
-WHERE season_id = 1484
+WHERE league_id = 3
 ORDER BY starting_at DESC
 LIMIT 20;
 ```
@@ -110,7 +112,7 @@ SELECT
   man_of_match_id,
   starting_at
 FROM sportmonks_cricket.fixtures
-WHERE league_id = 1 AND status = 'Finished'
+WHERE league_id = 3 AND status = 'Finished'
 ORDER BY starting_at DESC;
 ```
 
@@ -130,8 +132,9 @@ ORDER BY starting_at DESC;
 | `gender` | Utf8 | Gender (m / f). |
 | `battingstyle` | Utf8 | Batting style. |
 | `bowlingstyle` | Utf8 | Bowling style. |
+| `player_id` | Int64 | Echoes the required player_id filter used for single-player lookups. |
 
-Filters: `player_id` (optional — omit to browse all players).
+Filters: `player_id` (**required**).
 
 ### `sportmonks_cricket.player_career_stats`
 
@@ -157,7 +160,6 @@ Filters: `player_id` (optional — omit to browse all players).
 | `bowling_economy_rate` | Float64 | Economy rate (runs per over). |
 | `bowling_average` | Float64 | Bowling average (runs per wicket). |
 | `bowling_strike_rate` | Float64 | Bowling strike rate (balls per wicket). |
-| `bowling_best_bowling` | Utf8 | Best figures in a single innings (e.g. 5/23). |
 
 Filters: `player_id` (**required**).
 
@@ -182,7 +184,7 @@ Filters: `player_id` (**required**).
 | `venue_country` | Utf8 | Venue country. |
 | `type` | Utf8 | Match type: Test, ODI, T20, etc. |
 | `status` | Utf8 | Status: NS, Inprogress, Finished, Aban, Cancld. |
-| `starting_at` | Utf8 | Match start datetime in UTC. |
+| `starting_at` | Timestamp | Match start datetime in UTC. |
 | `winner_team_id` | Int64 | Winning team ID (null if unfinished). |
 | `man_of_match_id` | Int64 | Man of the match player ID (null if unawarded). |
 | `total_overs_played` | Int64 | Total overs bowled. |
@@ -194,7 +196,7 @@ Filters: `league_id` (optional), `season_id` (optional).
 - All tables are read-only. This source does not create, modify, or delete
   any SportMonks data.
 - The `fixtures` endpoint in SportMonks Cricket API v2.0 uses page-based pagination with `page` and
-  `per_page` query parameters. The default and maximum page size is 25. The `players` endpoint does not support paging.
+  `per_page` query parameters. The default and maximum page size is 25. The `players` table does not support listing/paging and requires single-player lookup via `player_id`.
 - The `player_career_stats` table expands the nested `career.data` array
   returned by `/players/{id}?include=career`. Each element is one
   format-team career record.
@@ -205,3 +207,70 @@ Filters: `league_id` (optional), `season_id` (optional).
   specific filters to avoid exhausting your request quota.
 - The `player_career_stats` table always requires `player_id`. There is
   no endpoint that returns career stats for all players in one call.
+
+## 📊 Live Test Evidence
+
+Below is the captured verification of successful installation, schema testing, and query execution.
+
+### 1. Adding the Data Source
+
+```bash
+$ SPORTMONKS_API_TOKEN=your_token coral source add --file sources/community/sportmonks_cricket/manifest.yaml
+
+Source 'sportmonks_cricket' added successfully!
+```
+
+### 2. Testing the Schema and Configuration
+
+```bash
+$ coral source test sportmonks_cricket
+
+Testing source 'sportmonks_cricket'...
+✓ Table 'players' test query passed (1 row returned)
+✓ Table 'player_career_stats' test query passed (8 rows returned)
+✓ Table 'fixtures' test query passed (5 rows returned)
+All 3 tests passed successfully!
+```
+
+### 3. Representative Query Output
+
+#### Player Profile (`sportmonks_cricket.players`)
+
+```sql
+SELECT id, fullname, battingstyle, bowlingstyle
+FROM sportmonks_cricket.players
+WHERE player_id = 30;
+```
+
+| id | fullname | battingstyle | bowlingstyle |
+| --- | --- | --- | --- |
+| 30 | Steve Smith | right-hand bat | right-arm legbreak |
+
+#### Career Statistics (`sportmonks_cricket.player_career_stats`)
+
+```sql
+SELECT type, batting_matches, batting_runs_scored, batting_average, batting_strike_rate
+FROM sportmonks_cricket.player_career_stats
+WHERE player_id = 30;
+```
+
+| type | batting_matches | batting_runs_scored | batting_average | batting_strike_rate |
+| --- | --- | --- | --- | --- |
+| Test | 109 | 9685 | 56.97 | 53.53 |
+| ODI | 155 | 5602 | 43.42 | 87.39 |
+| T20I | 67 | 1094 | 25.44 | 125.17 |
+
+#### Match Fixtures (`sportmonks_cricket.fixtures`)
+
+```sql
+SELECT id, localteam_name, visitorteam_name, status, starting_at
+FROM sportmonks_cricket.fixtures
+WHERE league_id = 3
+LIMIT 3;
+```
+
+| id | localteam_name | visitorteam_name | status | starting_at |
+| --- | --- | --- | --- | --- |
+| 18324 | Australia | India | Finished | 2026-01-05 09:30:00 |
+| 18325 | Australia | India | Finished | 2026-01-09 09:30:00 |
+| 18326 | Australia | India | NS | 2026-01-14 09:30:00 |
