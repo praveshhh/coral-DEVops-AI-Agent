@@ -105,6 +105,7 @@ SELECT
   venue_city
 FROM sportmonks_cricket.fixtures
 WHERE league_id = 3
+  AND starts_between = '2026-05-01,2026-05-28'
 ORDER BY starting_at DESC
 LIMIT 20;
 ```
@@ -120,7 +121,9 @@ SELECT
   man_of_match_id,
   starting_at
 FROM sportmonks_cricket.fixtures
-WHERE league_id = 3 AND status = 'Finished'
+WHERE league_id = 3
+  AND status = 'Finished'
+  AND starts_between = '2026-01-01,2026-05-28'
 ORDER BY starting_at DESC;
 ```
 
