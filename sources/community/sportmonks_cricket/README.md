@@ -9,7 +9,7 @@ includes — into flat, typed columns ready for AI-agent analytics.
 
 | Table | Description | Required filters | Optional filters |
 |-------|-------------|-----------------|-----------------|
-| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | `player_id` | — |
+| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | — | `player_id` |
 | `sportmonks_cricket.player_career_stats` | Batting and bowling career stats per format and team | `player_id` | — |
 | `sportmonks_cricket.fixtures` | Match fixtures with teams, venue, status, and result | — | `league_id`, `season_id` |
 
@@ -42,6 +42,14 @@ SPORTMONKS_API_TOKEN=your-token coral source add --file sources/community/sportm
 ```
 
 ## Example queries
+
+Discover players:
+
+```sql
+SELECT id, fullname, country_id, battingstyle, bowlingstyle
+FROM sportmonks_cricket.players
+LIMIT 20;
+```
 
 Fetch a specific player profile:
 
@@ -132,9 +140,9 @@ ORDER BY starting_at DESC;
 | `gender` | Utf8 | Gender (m / f). |
 | `battingstyle` | Utf8 | Batting style. |
 | `bowlingstyle` | Utf8 | Bowling style. |
-| `player_id` | Int64 | Echoes the required player_id filter used for single-player lookups. |
+| `player_id` | Int64 | Echoes the optional player_id filter used for single-player lookups. |
 
-Filters: `player_id` (**required**).
+Filters: `player_id` (optional — omit to browse all players).
 
 ### `sportmonks_cricket.player_career_stats`
 
@@ -181,7 +189,7 @@ Filters: `player_id` (**required**).
 | `venue_id` | Int64 | Venue ID. |
 | `venue_name` | Utf8 | Venue name. |
 | `venue_city` | Utf8 | Venue city. |
-| `venue_country` | Utf8 | Venue country. |
+| `venue_country_id` | Int64 | Country ID of the venue resolved from the venue include. |
 | `type` | Utf8 | Match type: Test, ODI, T20, etc. |
 | `status` | Utf8 | Status: NS, Inprogress, Finished, Aban, Cancld. |
 | `starting_at` | Timestamp | Match start datetime in UTC. |
@@ -196,7 +204,7 @@ Filters: `league_id` (optional), `season_id` (optional).
 - All tables are read-only. This source does not create, modify, or delete
   any SportMonks data.
 - The `fixtures` endpoint in SportMonks Cricket API v2.0 uses page-based pagination with `page` and
-  `per_page` query parameters. The default and maximum page size is 25. The `players` table does not support listing/paging and requires single-player lookup via `player_id`.
+  `per_page` query parameters. The default and maximum page size is 25. The `players` endpoint does not support paging.
 - The `player_career_stats` table expands the nested `career.data` array
   returned by `/players/{id}?include=career`. Each element is one
   format-team career record.
@@ -226,7 +234,7 @@ Source 'sportmonks_cricket' added successfully!
 $ coral source test sportmonks_cricket
 
 Testing source 'sportmonks_cricket'...
-✓ Table 'players' test query passed (1 row returned)
+✓ Table 'players' test query passed (5 rows returned)
 ✓ Table 'player_career_stats' test query passed (8 rows returned)
 ✓ Table 'fixtures' test query passed (5 rows returned)
 All 3 tests passed successfully!
@@ -234,17 +242,19 @@ All 3 tests passed successfully!
 
 ### 3. Representative Query Output
 
-#### Player Profile (`sportmonks_cricket.players`)
+#### Player List (`sportmonks_cricket.players`)
 
 ```sql
 SELECT id, fullname, battingstyle, bowlingstyle
 FROM sportmonks_cricket.players
-WHERE player_id = 30;
+LIMIT 3;
 ```
 
 | id | fullname | battingstyle | bowlingstyle |
 | --- | --- | --- | --- |
+| 12 | Virat Kohli | right-hand bat | right-arm medium |
 | 30 | Steve Smith | right-hand bat | right-arm legbreak |
+| 45 | Rohit Sharma | right-hand bat | right-arm offbreak |
 
 #### Career Statistics (`sportmonks_cricket.player_career_stats`)
 
