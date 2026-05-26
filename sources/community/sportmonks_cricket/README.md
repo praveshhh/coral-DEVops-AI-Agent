@@ -9,9 +9,9 @@ includes — into flat, typed columns ready for AI-agent analytics.
 
 | Table | Description | Required filters | Optional filters |
 |-------|-------------|-----------------|-----------------|
-| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | — | `player_id` |
+| `sportmonks_cricket.players` | Player profiles with name, country_id, batting and bowling style | — | `player_id`, `name`, `country_id` |
 | `sportmonks_cricket.player_career_stats` | Batting and bowling career stats per format and team | `player_id` | — |
-| `sportmonks_cricket.fixtures` | Match fixtures with teams, venue, status, and result | — | `league_id`, `season_id` |
+| `sportmonks_cricket.fixtures` | Match fixtures with teams, venue, status, and result | — | `league_id`, `season_id`, `localteam_id`, `visitorteam_id`, `status`, `starts_between` |
 
 ## Authentication
 
@@ -141,8 +141,9 @@ ORDER BY starting_at DESC;
 | `battingstyle` | Utf8 | Batting style. |
 | `bowlingstyle` | Utf8 | Bowling style. |
 | `player_id` | Int64 | Echoes the optional player_id filter used for single-player lookups. |
+| `name` | Utf8 | Exposes the optional name filter for provider-side player name search. |
 
-Filters: `player_id` (optional — omit to browse all players).
+Filters: `player_id` (optional), `name` (optional), `country_id` (optional) — omit to browse all players.
 
 ### `sportmonks_cricket.player_career_stats`
 
@@ -168,6 +169,7 @@ Filters: `player_id` (optional — omit to browse all players).
 | `bowling_economy_rate` | Float64 | Economy rate (runs per over). |
 | `bowling_average` | Float64 | Bowling average (runs per wicket). |
 | `bowling_strike_rate` | Float64 | Bowling strike rate (balls per wicket). |
+| `bowling_best_bowling` | Utf8 | Best bowling figures in a single innings (e.g. 5/23). |
 
 Filters: `player_id` (**required**).
 
@@ -191,20 +193,21 @@ Filters: `player_id` (**required**).
 | `venue_city` | Utf8 | Venue city. |
 | `venue_country_id` | Int64 | Country ID of the venue resolved from the venue include. |
 | `type` | Utf8 | Match type: Test, ODI, T20, etc. |
-| `status` | Utf8 | Status: NS, Inprogress, Finished, Aban, Cancld. |
+| `status` | Utf8 | Status: NS, Finished, 1st Innings, 2nd Innings, Int., Aban., Cancl., etc. |
 | `starting_at` | Timestamp | Match start datetime in UTC. |
 | `winner_team_id` | Int64 | Winning team ID (null if unfinished). |
 | `man_of_match_id` | Int64 | Man of the match player ID (null if unawarded). |
 | `total_overs_played` | Int64 | Total overs bowled. |
+| `starts_between` | Utf8 | Custom filter to get fixtures played between two dates (format YYYY-MM-DD,YYYY-MM-DD). |
 
-Filters: `league_id` (optional), `season_id` (optional).
+Filters: `league_id` (optional), `season_id` (optional), `localteam_id` (optional), `visitorteam_id` (optional), `status` (optional), `starts_between` (optional).
 
 ## Notes
 
 - All tables are read-only. This source does not create, modify, or delete
   any SportMonks data.
 - The `fixtures` endpoint in SportMonks Cricket API v2.0 uses page-based pagination with `page` and
-  `per_page` query parameters. The default and maximum page size is 25. The `players` endpoint does not support paging.
+  `per_page` query parameters. The default page size is 100, and the maximum allowed is 150. The `players` endpoint does not support paging.
 - The `player_career_stats` table expands the nested `career.data` array
   returned by `/players/{id}?include=career`. Each element is one
   format-team career record.

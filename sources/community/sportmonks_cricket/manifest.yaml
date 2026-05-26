@@ -48,6 +48,10 @@ tables:
     filters:
       - name: player_id
         required: false
+      - name: name
+        required: false
+      - name: country_id
+        required: false
     request:
       method: GET
       path: /players
@@ -55,6 +59,12 @@ tables:
         - name: api_token
           from: input
           key: SPORTMONKS_API_TOKEN
+        - name: filter[name]
+          from: filter
+          key: name
+        - name: filter[country_id]
+          from: filter
+          key: country_id
     requests:
       - when_filters:
           - player_id
@@ -159,6 +169,14 @@ tables:
         expr:
           kind: from_filter
           key: player_id
+      - name: name
+        type: Utf8
+        nullable: true
+        virtual: true
+        description: Exposes the optional name filter for provider-side player name search.
+        expr:
+          kind: from_filter
+          key: name
 
   # ──────────────────────────────────────────────────────────────────────
   # player_career_stats
@@ -408,10 +426,14 @@ tables:
       The `localteam_name` and `visitorteam_name` columns are resolved
       inline via the `localteam,visitorteam` include. Join to
       `player_career_stats` via `team_id` for rich analytics queries.
-    fetch_limit_default: 25
+    fetch_limit_default: 100
     filters:
       - name: league_id
       - name: season_id
+      - name: localteam_id
+      - name: visitorteam_id
+      - name: status
+      - name: starts_between
     request:
       method: GET
       path: /fixtures
@@ -428,6 +450,18 @@ tables:
         - name: filter[season_id]
           from: filter
           key: season_id
+        - name: filter[localteam_id]
+          from: filter
+          key: localteam_id
+        - name: filter[visitorteam_id]
+          from: filter
+          key: visitorteam_id
+        - name: filter[status]
+          from: filter
+          key: status
+        - name: filter[starts_between]
+          from: filter
+          key: starts_between
     response:
       rows_path:
         - data
@@ -438,8 +472,8 @@ tables:
       page_start: 1
       page_step: 1
       page_size:
-        default: 25
-        max: 25
+        default: 100
+        max: 150
         query_param: per_page
     columns:
       - name: id
@@ -588,8 +622,8 @@ tables:
         type: Utf8
         nullable: true
         description: >-
-          Match status: NS (not started), Inprogress, Finished, Aban (abandoned),
-          or Cancld.
+          Match status: NS (Not started), Finished, 1st Innings, 2nd Innings,
+          Int. (Interrupted), Aban. (Abandoned), Cancl. (Cancelled), etc.
         expr:
           kind: path
           path:
@@ -642,3 +676,11 @@ tables:
         expr:
           kind: from_filter
           key: season_id
+      - name: starts_between
+        type: Utf8
+        nullable: true
+        virtual: true
+        description: Custom filter to get fixtures played between two dates (format YYYY-MM-DD,YYYY-MM-DD).
+        expr:
+          kind: from_filter
+          key: starts_between
