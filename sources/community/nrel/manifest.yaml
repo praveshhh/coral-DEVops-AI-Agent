@@ -29,7 +29,7 @@ auth:
 
 test_queries:
   - >-
-    SELECT ac_annual, capacity_factor FROM nrel.pvwatts
+    SELECT ac_annual, capacity_factor, station_elevation FROM nrel.pvwatts
     WHERE lat = 40.0 AND lon = -105.0 AND system_capacity = 4.0
     AND module_type = 0 AND array_type = 0
     AND tilt = 30.0 AND azimuth = 180.0 AND losses = 14.0
@@ -40,7 +40,7 @@ test_queries:
     WHERE lat = 40.0 AND lon = -105.0
     LIMIT 1
   - >-
-    SELECT station_name, fuel_type_code, city, state
+    SELECT station_name, fuel_type, city, state
     FROM nrel.alt_fuel_stations
     WHERE state = 'CO'
     LIMIT 5
@@ -64,10 +64,15 @@ tables:
       - name: system_capacity
         required: true
       - name: module_type
+        required: true
       - name: array_type
+        required: true
       - name: losses
+        required: true
       - name: tilt
+        required: true
       - name: azimuth
+        required: true
       - name: bifacial
       - name: albedo
       - name: soiling
@@ -133,6 +138,70 @@ tables:
         expr:
           kind: from_filter
           key: system_capacity
+      - name: module_type
+        type: Int64
+        nullable: false
+        virtual: true
+        description: Echoes the required module_type filter.
+        expr:
+          kind: from_filter
+          key: module_type
+      - name: array_type
+        type: Int64
+        nullable: false
+        virtual: true
+        description: Echoes the required array_type filter.
+        expr:
+          kind: from_filter
+          key: array_type
+      - name: losses
+        type: Float64
+        nullable: false
+        virtual: true
+        description: Echoes the required losses filter.
+        expr:
+          kind: from_filter
+          key: losses
+      - name: tilt
+        type: Float64
+        nullable: false
+        virtual: true
+        description: Echoes the required tilt filter.
+        expr:
+          kind: from_filter
+          key: tilt
+      - name: azimuth
+        type: Float64
+        nullable: false
+        virtual: true
+        description: Echoes the required azimuth filter.
+        expr:
+          kind: from_filter
+          key: azimuth
+      - name: bifacial
+        type: Float64
+        nullable: true
+        virtual: true
+        description: Echoes the optional bifacial filter (Bifaciality ratio).
+        expr:
+          kind: from_filter
+          key: bifacial
+      - name: albedo
+        type: Float64
+        nullable: true
+        virtual: true
+        description: Echoes the optional albedo filter.
+        expr:
+          kind: from_filter
+          key: albedo
+      - name: soiling
+        type: Utf8
+        nullable: true
+        virtual: true
+        description: Echoes the optional soiling filter.
+        expr:
+          kind: from_filter
+          key: soiling
       - name: ac_annual
         type: Float64
         nullable: true
@@ -189,6 +258,13 @@ tables:
         expr:
           kind: path
           path: [station_info]
+      - name: station_elevation
+        type: Float64
+        nullable: true
+        description: Elevation of the selected climate station in meters.
+        expr:
+          kind: path
+          path: [station_info, elev]
 
   # ------------------------------------------------------------------
   # nrel.solar_resource — General TMY solar averages
@@ -256,21 +332,21 @@ tables:
       - name: avg_dni_monthly
         type: Json
         nullable: true
-        description: Monthly averages for Direct Normal Irradiance (month-keyed JSON object: jan, feb, etc.).
+        description: "Monthly averages for Direct Normal Irradiance (month-keyed JSON object: jan, feb, etc.)."
         expr:
           kind: path
           path: [outputs, avg_dni, monthly]
       - name: avg_ghi_monthly
         type: Json
         nullable: true
-        description: Monthly averages for Global Horizontal Irradiance (month-keyed JSON object: jan, feb, etc.).
+        description: "Monthly averages for Global Horizontal Irradiance (month-keyed JSON object: jan, feb, etc.)."
         expr:
           kind: path
           path: [outputs, avg_ghi, monthly]
       - name: avg_lat_tilt_monthly
         type: Json
         nullable: true
-        description: Monthly averages for Flat-plate Solar Resource at Latitude Tilt (month-keyed JSON object: jan, feb, etc.).
+        description: "Monthly averages for Flat-plate Solar Resource at Latitude Tilt (month-keyed JSON object: jan, feb, etc.)."
         expr:
           kind: path
           path: [outputs, avg_lat_tilt, monthly]
@@ -345,7 +421,7 @@ tables:
         expr:
           kind: path
           path: [station_name]
-      - name: fuel_type_code
+      - name: fuel_type
         type: Utf8
         nullable: false
         description: Fuel type abbreviation (e.g. ELEC for EV charging, CNG for natural gas, LPG, HY, E85).
@@ -394,7 +470,7 @@ tables:
         expr:
           kind: path
           path: [station_phone]
-      - name: status_code
+      - name: status
         type: Utf8
         nullable: true
         description: Current operational status code (E for open, P for planned, T for temporarily closed).
@@ -422,7 +498,7 @@ tables:
         expr:
           kind: path
           path: [longitude]
-      - name: access_code
+      - name: access
         type: Utf8
         nullable: true
         description: Access scoping (public or private).
