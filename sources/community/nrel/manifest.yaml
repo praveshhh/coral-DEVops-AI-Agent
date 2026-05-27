@@ -518,7 +518,7 @@ tables:
       - name: ev_connector_types
         type: Json
         nullable: true
-        description: Array of connector types available (e.g. CHADEMO, J1772, NACS, CCS1).
+        description: Array of connector types available (e.g. CHADEMO, J1772, TESLA, J1772COMBO, NEMA515).
         expr:
           kind: path
           path: [ev_connector_types]

@@ -71,11 +71,11 @@ Runs a photovoltaic system performance simulation using the industry-standard **
   - `array_type` (Int64): `0` = Fixed Open, `1` = Fixed Roof, `2` = 1-Axis Tracker, `3` = 1-Axis Backtracking, `4` = 2-Axis Tracker.
   - `losses` (Float64): System percentage losses (-5.0 to 99.0). Typically `14.0`.
   - `tilt` (Float64): Module tilt angle in degrees (0 to 90).
-  - `azimuth` (Float64): Module azimuth orientation in degrees (0 to 360).
+  - `azimuth` (Float64): Module azimuth orientation in degrees (0 <= azimuth < 360).
 * **Optional Configuration Filters**:
   - `bifacial` (Float64): Bifaciality ratio (decimal between 0 and 1, typically 0.65 to 0.9).
   - `albedo` (Float64): Ground reflectance ratio (0 to 1).
-  - `soiling` (Utf8): Pipe-delimited array of 12 monthly soiling values (e.g., `0.05|0.05|...`).
+  - `soiling` (Utf8): Pipe-delimited array of 12 monthly percentage values in the 0 to 100 range (e.g., `5|5|...` for 5% monthly soiling).
 
 ### 2. `nrel.solar_resource`
 Fetches Typical Meteorological Year (TMY) averages for a coordinate. Useful for high-level site planning and physical GHI/DNI evaluations before designing actual arrays.
