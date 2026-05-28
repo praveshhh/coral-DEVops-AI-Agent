@@ -116,7 +116,8 @@ tables:
         - name: soiling
           from: filter
           key: soiling
-    response: {} # Single object mapped directly to one row
+    response:
+      row_strategy: direct
     pagination:
       mode: none
     columns:
@@ -293,7 +294,8 @@ tables:
         - name: lon
           from: filter
           key: lon
-    response: {} # Single object mapped directly to one row
+    response:
+      row_strategy: direct
     pagination:
       mode: none
     columns:
